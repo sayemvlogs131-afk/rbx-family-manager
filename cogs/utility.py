@@ -450,6 +450,44 @@ class Utility(commands.Cog, name="Utility"):
         embed.set_image(url=url)
         await ctx.send(embed=embed)
 
+    @commands.hybrid_command(name="servericon")
+    @commands.guild_only()
+    @app_commands.describe(full="Also show the server banner if one is set")
+    async def servericon(self, ctx: commands.Context, full: bool = False) -> None:
+        """Show this server's icon in full size."""
+        guild = ctx.guild
+        icon = guild.icon
+        banner = guild.banner if full else None
+        if icon is None and banner is None:
+            await ctx.send(
+                embed=Embeds.info(
+                    "No icon",
+                    "**{0}** has no {1}.".format(
+                        guild.name,
+                        "icon or banner" if full else "icon set",
+                    ),
+                ),
+                ephemeral=True,
+            )
+            return
+        messages = []
+        if icon is not None:
+            icon_embed = Embeds.info(
+                f"Server icon • {guild.name}", f"[Open full size]({icon.url})"
+            )
+            icon_embed.set_image(url=icon.url)
+            messages.append(icon_embed)
+        if banner is not None:
+            banner_embed = Embeds.info(
+                f"Server banner • {guild.name}", f"[Open full size]({banner.url})"
+            )
+            banner_embed.set_image(url=banner.url)
+            messages.append(banner_embed)
+        if len(messages) == 1:
+            await ctx.send(embed=messages[0])
+        else:
+            await ctx.send(embeds=messages)
+
     @commands.hybrid_command(name="roleinfo")
     @commands.guild_only()
     @app_commands.describe(role="Role to inspect")

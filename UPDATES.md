@@ -9,6 +9,10 @@ Format rules:
 - Bullet lines start with one of the status emoji: 🟢 Added, 🛠️ Fixed,
   ⚡ Improved, 🔒 Security, 🔴 Critical Issue.
 
+# v2.1.1 — Server icon
+
+🟢 Added: `/servericon` — see any server's icon in full size (`/servericon full:yes` also shows the server banner).
+
 # v2.1.0 — Goodbyes, raids & web dashboard
 
 🟢 Added: `/leave setup channel:#welcome message:...` — a full goodbye system: every leaver is announced with their mention, avatar, account age and time-in-server; the message is fully customizable, and `/leave test` previews it.
