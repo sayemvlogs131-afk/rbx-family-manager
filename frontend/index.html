@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RBX Family Manager — Admin</title>
+  <style>
+    :root {
+      --bg: #0e1013;
+      --panel: #161a21;
+      --border: #2a2f3a;
+      --text: #e7e9ea;
+      --muted: #8b919e;
+      --accent: #5865F2;
+      --ok: #57F287;
+      --warn: #FEE75C;
+      --bad: #ED4245;
+    }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    body { padding: 24px; }
+    .top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+    h1 { margin: 0; font-size: 22px; }
+    .sub { color: var(--muted); margin-top: 4px; }
+    .health { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--warn); }
+    .dot.ok { background: var(--ok); }
+    .dot.bad { background: var(--bad); }
+    .dot.warn { background: var(--warn); }
+    .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+    .stat .k { color: var(--muted); font-size: 12px; letter-spacing: .4px; text-transform: uppercase; }
+    .stat .v { font-size: 20px; margin-top: 4px; }
+    .main { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+    .card.wide { grid-column: 1 / -1; }
+    .card h2 { margin: 0 0 12px; font-size: 16px; color: var(--muted); font-weight: 500; letter-spacing: 0.3px; }
+    .row { display: flex; justify-content: space-between; padding: 6px 0; border-top: 1px solid var(--border); }
+    .row:first-of-type { border-top: 0; }
+    .label { color: var(--muted); }
+    .val { word-break: break-word; }
+    code { background: #262b35; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 12px; background: #262b35; color: var(--muted); }
+    .pill.ok { background: rgba(87, 242, 135, 0.15); color: var(--ok); }
+    .pill.warn { background: rgba(254, 231, 92, 0.15); color: var(--warn); }
+    .pill.bad { background: rgba(237, 66, 69, 0.15); color: var(--bad); }
+    .loading { color: var(--muted); }
+    .tagline { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+    ul.changelog { margin: 0; padding-left: 18px; }
+    ul.changelog li { margin-bottom: 6px; }
+    .sec-head { color: var(--muted); font-weight: 600; font-size: 13px; margin: 10px 0 4px; }
+    select { background: #262b35; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+    .tokenBanner { background: rgba(237,66,69,.1); border: 1px solid rgba(237,66,69,.4); color: var(--text);
+      padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; display: none; }
+    .tokenBanner input { background: #262b35; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; width: 320px; }
+    .tokenBanner button { background: var(--accent); color: white; border: 0; border-radius: 6px; padding: 7px 12px; cursor: pointer; }
+    footer { margin-top: 32px; color: var(--muted); font-size: 13px; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="tokenBanner" id="tokenBanner">
+    <b>Dashboard locked.</b> Paste your admin token below (file
+    <code>data/web_admin_token.txt</code> or the <code>WEB_ADMIN_TOKEN</code> env var):
+    <div style="margin-top:8px">
+      <input id="tokenInput" placeholder="admin token" autocomplete="off">
+      <button id="tokenSave">Unlock</button>
+    </div>
+  </div>
+
+  <div class="top">
+    <div>
+      <h1>RBX Family Manager</h1>
+      <div class="sub">Admin dashboard — bot status, servers, changelog & security</div>
+    </div>
+    <div class="health" id="health">
+      <span class="dot" id="dot"></span>
+      <span id="healthText">checking…</span>
+    </div>
+  </div>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="main" id="content">
+    <div class="card wide" style="text-align:center; padding:24px;">
+      <div class="loading">Loading dashboard…</div>
+    </div>
+  </div>
+
+  <footer>
+    Connected to <code id="botName">RBX Family Manager</code> ·
+    <a href="/health" target="_blank" rel="noopener">live health endpoint</a>
+  </footer>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const STATUS_DOT = { online: "ok", maintenance: "warn", issues: "bad" };
+    const STATUS_LABEL = { online: "🟢 Online", maintenance: "🟡 Maintenance", issues: "🔴 Issues" };
+
+    // ---- token handling ----------------------------------------------------
+    function getToken() {
+      const url = new URL(location.href);
+      const t = url.searchParams.get("token");
+      if (t) {
+        localStorage.setItem("rbx_admin_token", t);
+        url.searchParams.delete("token");
+        history.replaceState(null, "", url.pathname + url.search);
+      }
+      return localStorage.getItem("rbx_admin_token") || "";
+    }
+    const TOKEN = getToken();
+
+    async function api(path) {
+      const res = await fetch(path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN));
+      if (res.status === 401) throw Object.assign(new Error("unauthorized"), { unauthorized: true });
+      if (!res.ok) throw new Error("http " + res.status);
+      return res.json();
+    }
+
+    function showTokenBanner() {
+      $("tokenBanner").style.display = "block";
+    }
+    $("tokenSave").onclick = () => {
+      localStorage.setItem("rbx_admin_token", $("tokenInput").value.trim());
+      location.reload();
+    };
+
+    // ---- overview ----------------------------------------------------------
+    async function refreshHealth() {
+      try {
+        const data = await api("/api/overview");
+        const dot = $("dot");
+        dot.className = "dot " + (STATUS_DOT[data.status] || "warn");
+        $("healthText").textContent = `${STATUS_LABEL[data.status] || data.status} · v${data.version ?? "?"} · ${data.latencyMs ?? "-"}ms`;
+        $("botName").textContent = data.bot || "RBX Family Manager";
+
+        const stats = $("stats");
+        stats.innerHTML = "";
+        const addStat = (k, v, pillClass = "") => {
+          const el = document.createElement("div");
+          el.className = "stat";
+          el.innerHTML = `<div class="k">${k}</div><div class="v ${pillClass}">${v}</div>`;
+          stats.appendChild(el);
+        };
+        addStat("Status", STATUS_LABEL[data.status] || data.status);
+        addStat("Version", `v${data.version ?? "?"}`);
+        addStat("Servers", data.guilds ?? 0);
+        addStat("Latency", (data.latencyMs ?? "—") + " ms");
+        let extras = "";
+        if ((data.startupErrors || []).length > 0) {
+          extras = `<div class="stats" style="margin-bottom:24px"><div class="stat" style="grid-column:1/-1">
+            <div class="k">Startup problems</div>
+            <div class="v" style="font-size:14px;color:var(--bad)">cogs failed to load: ${data.startupErrors.map(escapeHtml).join(", ")}</div>
+          </div></div>`;
+        }
+        stats.insertAdjacentHTML("afterend", ""); // no-op keeps layout stable
+        if (extras) $("health").insertAdjacentHTML("beforebegin", extras.replace('<div class="stats" style="margin-bottom:24px">', '<div class="stats" style="margin-bottom:24px">'));
+        if ((data.statusMessage || "").trim()) {
+          addStatSafe(data.statusMessage);
+        }
+        await loadChangelog();
+        await loadSecurity();
+      } catch (err) {
+        if (err.unauthorized) { showTokenBanner(); }
+        else { $("dot").className = "dot bad"; $("healthText").textContent = "cannot reach bot"; }
+      }
+      await loadServers();
+    }
+
+    function addStatSafe(message) {
+      const stats = $("stats");
+      const el = document.createElement("div");
+      el.className = "stat";
+      el.innerHTML = `<div class="k">Owner note</div><div class="v" style="font-size:14px">${escapeHtml(message)}</div>`;
+      stats.appendChild(el);
+    }
+
+    // ---- changelog ---------------------------------------------------------
+    async function loadChangelog() {
+      const box = document.createElement("div");
+      box.className = "card wide";
+      box.id = "changelogCard";
+      box.innerHTML = `<h2>📝 Changelog — recent bot updates</h2><div class="loading" id="changelogBody">loading…</div>`;
+      $("content").after(box); // placeholder; real target set after servers render
+      try {
+        const cl = await api("/api/changelog");
+        if (!cl.version) {
+          $("changelogBody").innerHTML = `<span class="loading">${escapeHtml(cl.note || "no release notes")}</span>`;
+          return;
+        }
+        const sections = Object.entries(cl.sections || {})
+          .map(([label, items]) => `<div class="sec-head">${escapeHtml(label)}</div><ul class="changelog">${(items || []).map(i => `<li>${escapeHtml(i)}</li>`).join("")}</ul>`)
+          .join("");
+        $("changelogBody").innerHTML = `<div class="tagline">v${escapeHtml(cl.version)} — ${escapeHtml(cl.title || "")}</div>${sections}`;
+      } catch (err) {
+        if (err.unauthorized) showTokenBanner();
+        $("changelogBody").innerHTML = `<span class="loading">unavailable</span>`;
+      }
+    }
+
+    // ---- security feed -----------------------------------------------------
+    let serverOptions = [];
+    async function loadSecurity() {
+      const sec = document.createElement("div");
+      sec.className = "card wide";
+      sec.id = "securityCard";
+      sec.innerHTML = `
+        <h2>🛡️ Security — anti-nuke & audit log</h2>
+        <div class="tagline">
+          <select id="secGuild"></select>
+        </div>
+        <div id="secBody"><span class="loading">loading…</span></div>`;
+      document.body.appendChild(sec);
+      document.body.appendChild(document.createElement("div"));
+      const target = sec;
+      try {
+        const servers = await api("/api/servers");
+        serverOptions = servers.servers || [];
+        const sel = target.querySelector("#secGuild");
+        sel.innerHTML = serverOptions.map(g => `<option value="${g.id}">${escapeHtml(g.name)}</option>`).join("");
+        if (serverOptions.length > 0) sel.value = String(serverOptions[0].id);
+        sel.onchange = () => renderSecurity(sel.value);
+        if (serverOptions.length > 0) await renderSecurity(sel.value);
+        else target.querySelector("#secBody").innerHTML = `<span class="loading">no servers yet</span>`;
+      } catch (err) {
+        if (err.unauthorized) showTokenBanner();
+        target.querySelector("#secBody").innerHTML = `<span class="loading">unavailable</span>`;
+      }
+    }
+
+    async function renderSecurity(guildId) {
+      const body = document.querySelector("#secBody");
+      body.innerHTML = `<span class="loading">loading…</span>`;
+      try {
+        const data = await api("/api/security?guild_id=" + guildId);
+        const s = data.settings || {};
+        const gm = (id) => `<span class="pill ok">set</span><span class="loading">&nbsp;<@${id}></span>`;
+        const onoff = (flag) => flag ? `<span class="pill ok">ON</span>` : `<span class="pill bad">OFF</span>`;
+        const settingsHtml = `
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px 24px">
+            <div><b>Anti-nuke</b> ${onoff(!!s.anti_nuke_enabled)}</div>
+            <div><span class="label">Breach action:</span> ${escapeHtml(String(s.action ?? "timeout"))}</div>
+            <div><span class="label">Ban limit:</span> ${escapeHtml(String(s.ban_limit ?? "-"))} / ${escapeHtml(String(s.window_seconds ?? 60))}s</div>
+            <div><span class="label">Kick limit:</span> ${escapeHtml(String(s.kick_limit ?? "-"))} / ${escapeHtml(String(s.window_seconds ?? 60))}s</div>
+            <div><span class="label">Channel deletes:</span> ${escapeHtml(String(s.channel_limit ?? "-"))} / ${escapeHtml(String(s.window_seconds ?? 60))}s</div>
+            <div><span class="label">Role deletes:</span> ${escapeHtml(String(s.role_limit ?? "-"))} / ${escapeHtml(String(s.window_seconds ?? 60))}s</div>
+            <div><span class="label">Joins (raid):</span> ${escapeHtml(String(s.join_limit ?? "-"))} / ${escapeHtml(String(s.join_window_seconds ?? 30))}s</div>
+            <div><span class="label">Suspicious accounts:</span> &lt; ${escapeHtml(String(s.min_account_age_days ?? 3))} days</div>
+            <div><span class="label">Trusted users:</span> ${escapeHtml(String(s.trusted_user_ids ?? "[]"))}</div>
+            <div><span class="label">Trusted roles:</span> ${escapeHtml(String(s.trusted_role_ids ?? "[]"))}</div>
+          </div>`;
+        const events = data.events || [];
+        const rows = events.map(ev => {
+          const sev = ev.severity === "critical" ? "bad" : ev.severity === "warning" ? "warn" : "ok";
+          return `<tr>
+            <td><span class="pill ${sev}">${escapeHtml(ev.severity || "info")}</span></td>
+            <td><code>${escapeHtml(ev.event)}</code></td>
+            <td>${ev.actor_id ? escapeHtml(String(ev.actor_id)) : "—"}</td>
+            <td class="label">${escapeHtml(String(ev.details || ""))}</td>
+            <td class="label">${escapeHtml(String(ev.created_at || ""))}</td>
+          </tr>`;
+        }).join("");
+        body.innerHTML = settingsHtml + `
+          <h2 style="margin-top:16px">Audit log</h2>
+          ${rows ? `<table style="width:100%;border-collapse:collapse;font-size:13px">
+            <thead><tr class="label"><th align="left">Severity</th><th align="left">Event</th><th align="left">Actor</th><th align="left">Details</th><th align="left">When (UTC)</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>` : `<span class="loading">no security events recorded yet</span>`}
+        `;
+      } catch (err) {
+        body.innerHTML = `<span class="loading">unavailable (${err.message || err})</span>`;
+      }
+    }
+
+    // ---- servers -----------------------------------------------------------
+    async function loadServers() {
+      const box = $("content");
+      try {
+        const servers = await api("/api/servers");
+        const list = servers.servers || [];
+        if (list.length === 0) {
+          box.innerHTML = `<div class="card" style="text-align:center; padding:24px;"><div class="loading">no servers loaded yet</div></div>`;
+          return;
+        }
+        box.innerHTML = "";
+        for (const g of list) {
+          const card = document.createElement("div");
+          card.className = "card";
+          card.innerHTML = `
+            <h2>${escapeHtml(g.name)}</h2>
+            <div class="row"><span class="label">ID</span><span class="val"><code>${g.id}</code></span></div>
+            <div class="row"><span class="label">Members</span><span class="val">${g.memberCount ?? "—"}</span></div>
+            <div class="row"><span class="label">Channels</span><span class="val">${g.channelCount ?? "—"}</span></div>
+            <div class="row"><span class="label">Roles</span><span class="val">${g.roleCount ?? "—"}</span></div>
+            <div class="row"><span class="label">Owner</span><span class="val">${escapeHtml(g.owner ?? "—")}</span></div>
+            <div class="row"><span class="label">Staff role</span><span class="val">${formatRole(g.staffRole)}</span></div>
+            <div class="row"><span class="label">Mod log</span><span class="val">${formatChannel(g.modLogChannel)}</span></div>
+            <div class="row"><span class="label">Welcome channel</span><span class="val">${formatChannel(g.welcomeChannel)}</span></div>
+            <div class="row"><span class="label">Auto role</span><span class="val">${formatRole(g.autoRole)}</span></div>
+            <div class="row"><span class="label">Ticket system</span><span class="val"><span class="pill ${g.ticketSystem ? "ok" : ""}">${g.ticketSystem ? "set up" : "not set up"}</span></span></div>
+            <div class="row"><span class="label">Open tickets</span><span class="val">${g.openTickets ?? "—"}</span></div>
+            <div class="row"><span class="label">Setup</span><span class="val"><span class="pill ok">${escapeHtml(g.setupStatus ?? "configured")}</span></span></div>
+          `;
+          box.appendChild(card);
+        }
+      } catch (err) {
+        if (err.unauthorized) showTokenBanner();
+        else box.innerHTML = `<div class="card" style="text-align:center; padding:24px;"><div class="loading">failed to load servers</div></div>`;
+      }
+    }
+
+    function escapeHtml(s) {
+      if (s == null) return "";
+      return String(s).replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      }[c]));
+    }
+
+    function formatRole(role) {
+      if (!role) return `<span class="pill">—</span>`;
+      return `<span class="pill ok">${escapeHtml(role.name)}</span>`;
+    }
+
+    function formatChannel(ch) {
+      if (!ch) return `<span class="pill">—</span>`;
+      return `<span class="pill">${escapeHtml(ch.name)}</span>`;
+    }
+
+    refreshHealth();
+    setInterval(refreshHealth, 30000);
+  </script>
+</body>
+</html>

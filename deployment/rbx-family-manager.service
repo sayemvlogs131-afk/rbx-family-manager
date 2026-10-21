@@ -1,0 +1,52 @@
+# ---------------------------------------------------------------------------
+# RBX Family Manager - systemd unit
+#
+# Install:
+#   sudo cp deployment/rbx-family-manager.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now rbx-family-manager
+#
+# Replace the paths/user below if your checkout lives somewhere else.
+#   APP_DIR = where you cloned the repository
+#   USER    = the dedicated Linux account that runs the bot
+# ---------------------------------------------------------------------------
+
+[Unit]
+Description=RBX Family Manager Discord bot
+Documentation=https://github.com/RBXFamily/rbx-family-manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+Group=botuser
+WorkingDirectory=/home/botuser/rbx-family-manager
+Environment=PATH=/home/botuser/rbx-family-manager/.venv/bin:/usr/bin
+EnvironmentFile=-/home/botuser/rbx-family-manager/.env
+
+# The virtual environment keeps the system Python clean.
+ExecStart=/home/botuser/rbx-family-manager/.venv/bin/python /home/botuser/rbx-family-manager/bot.py
+
+# Reliability: always come back after a crash or a machine reboot.
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+
+# Clean shutdown so SQLite and Discord see a graceful exit.
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+# Logs: journalctl -u rbx-family-manager -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rbx-family-manager
+
+# Basic hardening (the bot only needs to write to its own data/ folder).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/home/botuser/rbx-family-manager/data
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+{
+  "bot": "RBX Family Manager",
+  "servers": [
+    {
+      "id": 123456789012345678,
+      "name": "Example Server",
+      "memberCount": 1234,
+      "channelCount": 42,
+      "roleCount": 18,
+      "owner": "ServerOwner#0001",
+      "prefix": "!",
+      "staffRole": {"id": 987654321098765432, "name": "Staff"},
+      "modLogChannel": {"id": 111222333444555666, "name": "mod-logs"},
+      "welcomeChannel": {"id": 666777888999000111, "name": "welcome"},
+      "autoRole": {"id": 222333444555666777, "name": "Member"},
+      "ticketSystem": true,
+      "openTickets": 3,
+      "setupStatus": "partial: staff, mod logs, welcome"
+    }
+  ],
+  "updated_at": 120
+}

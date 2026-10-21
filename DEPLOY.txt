@@ -1,0 +1,76 @@
+====================================================================
+ RBX FAMILY MANAGER v2.1.0 - DEPLOY ON BOT-HOSTING.NET (free plan)
+====================================================================
+
+Do this once. Takes ~5 minutes.
+
+STEP 1 - Create the server
+--------------------------
+* Go to https://bot-hosting.net and log in with Discord.
+* "Create Server" -> Name: anything (e.g. rbx-family).
+  Language: PYTHON  <-- must be Python, not Node.js.
+* Pick the cheapest/lightest plan -> weekly billing -> confirm.
+  (This bot is light: ~300 MB RAM is plenty.)
+
+STEP 2 - Upload this zip
+------------------------
+* Open the new server in the control panel -> FILES tab.
+* Click UPLOAD and upload this zip file.
+* Click the 3-dots menu next to the zip -> "Unarchive".
+* It extracts into a folder "rbx-family-manager". Open that folder,
+  tick ALL files -> click "Move" -> type:  ..
+  (two dots) -> Enter. This moves everything to the server root.
+* Delete the empty folder and the zip from that folder to free space.
+
+STEP 3 - Configure startup
+--------------------------
+* Open the STARTUP tab.
+* Main file / "Bot Python file":  bot.py
+* Packages: requirements.txt is auto-installed when the bot starts -
+  do NOT add anything by hand. It already contains discord.py,
+  fastapi (web dashboard), uvicorn, jinja2, aiosqlite, aiohttp and
+  python-dotenv.
+
+STEP 4 - Token / .env
+---------------------
+* The .env file inside this zip already has your Discord token and
+  owner IDs - no extra setup needed.
+* If you ever delete .env by accident: copy .env.example, open it in
+  the file editor and put your bot token in DISCORD_TOKEN.
+* KEEP THE ZIP PRIVATE - it contains your bot token and dashboard
+  token. Never upload it to Discord or share it.
+
+STEP 5 - Start
+--------------
+* Click Start and watch the Console. Wait for:
+      "Logged in as RBX Family Manager"
+      "Admin dashboard listening on :8080/"   (optional - if fastapi
+        could not install, the bot still runs, only without dashboard)
+* All 76 slash commands sync automatically on first start.
+
+IMPORTANT - ONE TOKEN, ONE INSTANCE
+-----------------------------------
+Before starting the bot on bot-hosting.net, STOP the one on your PC:
+double-click stop-bot.bat there. If the same token runs on both the
+PC and the host at once, Discord resets your token and the bot goes
+offline until you paste a fresh token into .env on both machines.
+
+YOUR DATA CAME WITH YOU
+-----------------------
+The data/ folder in the zip contains your SQLite database - trusted
+users/roles, welcome/leave messages, ticket and giveaway state all
+keep working. New data is written on the host from now on, so do not
+copy newer PC data over it while both are running.
+
+DASHBOARD ON THE HOST
+---------------------
+http://SERVER-IP:8080/?token=... only works on the host's own
+network (localhost) on free plans. If you need it from outside,
+open a support ticket with bot-hosting.net to ask for a port
+allocation, or skip the dashboard and manage everything with slash
+commands (/securitysetup, /leave setup, /auditlogs, /changelog).
+
+TO RETURN TO PC LATER
+---------------------
+1. In the panel: stop the server.
+2. On the PC: start-bot.bat. Same data, same token. Done.

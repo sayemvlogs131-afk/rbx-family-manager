@@ -1,0 +1,25 @@
+# Keep secrets and local artifacts out of the container image.
+.git
+.gitignore
+.env
+*.env
+!.env.example
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.db
+*.db-*
+*.log
+data/*
+!data/.gitkeep
+.pytest_cache
+.mypy_cache
+.ruff_cache
+tests
+deployment
+README.md
+LICENSE
+Procfile
+*.md

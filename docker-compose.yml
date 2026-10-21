@@ -1,0 +1,34 @@
+services:
+  rbx-family-manager:
+    build: .
+    image: rbx-family-manager:latest
+    container_name: rbx-family-manager
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Keep SQLite inside the mounted volume regardless of .env values.
+      DATABASE_PATH: /app/data/rbx_family.db
+      LOG_FILE: /app/data/rbx_family.log
+      HEALTH_ENABLED: "true"
+      HEALTH_PORT: "8080"
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "127.0.0.1:8080:8080"
+    # The health endpoint is for monitoring only, never to fake uptime.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health').status==200 else 1)"
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
