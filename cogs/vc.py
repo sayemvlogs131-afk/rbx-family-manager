@@ -76,9 +76,36 @@ def _cookies_file() -> str:
     return ""
 
 
+def _ydl_raw_pick(yt_dlp: Any, opts: dict[str, Any], target: str) -> dict[str, Any] | None:
+    """Extract without yt-dlp's format selector and return the raw video info.
+
+    YouTube's SABR migration makes yt-dlp's own "bestaudio" selector choke with
+    "Requested format is not available" even when real media formats exist in
+    the raw response (verified: 23 videoplayback formats). We bypass the
+    selector and let :func:`_ydl_resolve` pick an audio stream itself.
+    """
+    with yt_dlp.YoutubeDL(dict(opts)) as ydl:
+        raw = ydl.extract_info(target, download=False, process=False)
+    if not raw:
+        return None
+    if "entries" in raw:
+        raw = next((entry for entry in raw["entries"] if entry), None) or {}
+    formats = [f for f in (raw.get("formats") or []) if f.get("url")]
+    media = [
+        f
+        for f in formats
+        if "storyboard" not in str(f.get("format_id"))
+        and f.get("ext") != "mhtml"
+    ]
+    if not media and not raw.get("url"):
+        return None
+    return raw
+
+
 def _ydl_extract(yt_dlp: Any, target: str) -> dict[str, Any]:
-    """Attempt the extraction twice: with browser cookies (normal), then with
-    embedded-player clients that sometimes dodge YouTube's bot check."""
+    """Attempt the extraction in-order: browser cookies (normal), then
+    embedded-player clients, then plain. A selector failure triggers a raw
+    re-pick so SABR-only responses still yield playable audio."""
     cookies = _cookies_file()
     base: dict[str, Any] = {
         "quiet": True,
@@ -108,6 +135,12 @@ def _ydl_extract(yt_dlp: Any, target: str) -> dict[str, Any]:
                 info = ydl.extract_info(target, download=False)
         except yt_dlp.utils.DownloadError as exc:
             last_error = str(exc)
+            if "Requested format is not available" in last_error:
+                # YouTube serves SABR-era format lists the selector can't
+                # name — grab the raw response and pick audio ourselves.
+                info = _ydl_raw_pick(yt_dlp, opts, target)
+                if info:
+                    return info
             continue
         if info:
             return info
@@ -163,9 +196,16 @@ def _ydl_resolve(query: str) -> dict:
 
     stream_url = info.get("url")
     if stream_url is None:
-        # Some extractors only expose the stream on individual formats.
-        formats = [f for f in (info.get("formats") or []) if f.get("url")]
-        audio = [f for f in formats if (f.get("acodec") or "") != "none"]
+        # Some extractors only expose the stream on individual formats. Prefer
+        # real audio entries; storyboards (thumbnail strips) are not playable.
+        formats = [
+            f
+            for f in (info.get("formats") or [])
+            if f.get("url")
+            and "storyboard" not in str(f.get("format_id"))
+            and f.get("ext") != "mhtml"
+        ]
+        audio = [f for f in formats if (f.get("acodec") or "none") != "none"]
         preferred = audio or formats
         if preferred:
             stream_url = preferred[-1].get("url")
