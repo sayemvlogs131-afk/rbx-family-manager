@@ -333,6 +333,10 @@ class VCSystem(commands.Cog, name="VC System"):
         attempts = 0
         while attempts < 5:
             attempts += 1
+            if vc.is_playing() or vc.is_paused():
+                # Another caller (e.g. a track ending while /play runs) already
+                # started the next track — don't steal the queue from under it.
+                return
             track = state.queue.popleft() if state.queue else None
             if track is None:
                 state.current = None
@@ -534,7 +538,9 @@ class VCSystem(commands.Cog, name="VC System"):
         await ctx.defer()
         state, err = await self._ensure_voice(ctx, None)
         if err:
-            await ctx.send(embed=Embeds.error("Can't play", err), ephemeral=True)
+            # We already deferred, so this is a followup to a public message —
+            # the ephemeral flag is not honoured there.
+            await ctx.send(embed=Embeds.error("Can't play", err))
             return
 
         try:
