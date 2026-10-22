@@ -19,8 +19,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 from collections import deque
+from pathlib import Path
 from typing import Any, Optional
 
 import discord
@@ -57,6 +59,61 @@ class MissingMusicSource(RuntimeError):
     """yt-dlp (the music backend) is not installed on this host."""
 
 
+_BOT_CHECK_WORDS = ("sign in to confirm", "confirm you\u2019re not a bot", "not a bot")
+
+
+def _cookies_file() -> str:
+    """Path to a cookies.txt the owner can drop in the bot folder (or via YTDLP_COOKIES env).
+
+    YouTube blocks datacenter IPs — a signed-in browser's cookies are the usual fix.
+    """
+    from_env = os.environ.get("YTDLP_COOKIES", "").strip()
+    if from_env and Path(from_env).is_file():
+        return from_env
+    root = Path(__file__).resolve().parent.parent / "cookies.txt"
+    if root.is_file():
+        return str(root)
+    return ""
+
+
+def _ydl_extract(yt_dlp: Any, target: str) -> dict[str, Any]:
+    """Attempt the extraction twice: with browser cookies (normal), then with
+    embedded-player clients that sometimes dodge YouTube's bot check."""
+    cookies = _cookies_file()
+    base: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "format": "bestaudio/best",
+        "default_search": "ytsearch1",
+        "nocheckcertificate": True,
+    }
+    if cookies:
+        base["cookiefile"] = cookies
+
+    attempts: list[dict[str, Any]] = []
+    if cookies:
+        attempts.append({})  # cookies + plain default clients are the most reliable
+    attempts.append(
+        {"extractor_args": {"youtube": {"player_client": ["web_embedded", "tv_embedded"]}}}
+    )
+    attempts.append({})
+
+    last_error = ""
+    for extra in attempts:
+        opts = {**base, **extra}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(target, download=False)
+        except yt_dlp.utils.DownloadError as exc:
+            last_error = str(exc)
+            continue
+        if info:
+            return info
+    raise LookupError(last_error or "No results")
+
+
 class Track:
     """One queued audio source."""
 
@@ -90,21 +147,11 @@ def _ydl_resolve(query: str) -> dict:
     except ImportError as exc:  # dependency missing on this host
         raise MissingMusicSource() from exc
 
-    opts: dict[str, Any] = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "noplaylist": True,
-        "format": "bestaudio/best",
-        "default_search": "ytsearch1",
-        "nocheckcertificate": True,
-    }
     target = query.strip()
     if not re.match(r"^https?://", target):
         target = f"ytsearch1:{target}"
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(target, download=False)
 
+    info = _ydl_extract(yt_dlp, target)
     if not info:
         raise LookupError("No results")
     if "entries" in info:
@@ -501,7 +548,19 @@ class VCSystem(commands.Cog, name="VC System"):
             )
             return
         except LookupError as exc:
-            await ctx.send(embed=Embeds.error("Not found", f"Could not resolve that song: {exc}"))
+            msg = str(exc).lower()
+            if "sign in to confirm" in msg or "not a bot" in msg:
+                await ctx.send(
+                    embed=Embeds.error(
+                        "YouTube wants me to sign in 🔒",
+                        "YouTube is blocking this server's IP (I already tried embedded-player fallbacks). "
+                        "Fix: export a `cookies.txt` from your browser (use the \u201cGet cookies.txt LOCALLY\u201d "
+                        "extension on youtube.com), then upload the file to the bot Files panel as `cookies.txt` "
+                        "and restart. After that /play works normally.",
+                    )
+                )
+            else:
+                await ctx.send(embed=Embeds.error("Not found", f"Could not resolve that song: {exc}"))
             return
         except Exception:
             log.exception("yt-dlp lookup failed for %r", query)

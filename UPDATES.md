@@ -9,6 +9,12 @@ Format rules:
 - Bullet lines start with one of the status emoji: 🟢 Added, 🛠️ Fixed,
   ⚡ Improved, 🔒 Security, 🔴 Critical Issue.
 
+# v2.2.1 — Music fix for "Sign in to confirm you're not a bot"
+
+🛠️ Fixed: `/play` on YouTube could fail with "Sign in to confirm you're not a bot" — that's YouTube blocking datacenter IPs, not a bug in the bot.
+⚡ Improved: `/play` now automatically retries with embedded-player clients, and supports a `cookies.txt` file (export from your browser, then upload it to the bot Files panel as `cookies.txt`) to lift the block permanently.
+✅ Fixed: voice join (`/join`, `/autojoin`) now includes the `davey` library required by discord.py 2.7+ — joining works on all hosts.
+
 # v2.2.0 — Voice & music system
 
 🟢 Added: `/join` — the bot hops into the voice channel you're in (or any channel you pick).
