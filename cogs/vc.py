@@ -561,8 +561,8 @@ class VCSystem(commands.Cog, name="VC System"):
                         "YouTube wants me to sign in 🔒",
                         "YouTube is blocking this server's IP (I already tried embedded-player fallbacks). "
                         "Fix: export a `cookies.txt` from your browser (use the \u201cGet cookies.txt LOCALLY\u201d "
-                        "extension on youtube.com), then upload the file to the bot Files panel as `cookies.txt` "
-                        "and restart. After that /play works normally.",
+                        "extension on youtube.com), then upload the file to the bot Files panel as `cookies.txt`. "
+                        "No restart needed — just run /play again and I'll pick it up instantly.",
                     )
                 )
             else:
