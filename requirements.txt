@@ -6,6 +6,8 @@ python-dotenv>=1.0.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 jinja2>=3.1.0
-# Voice / music system (FFmpeg must exist on the host; the bot image ships it)
-PyNaCl>=1.5.0
+# Voice / music system (FFmpeg must exist on the host; the bot image ships it).
+# davey is required by discord.py 2.7+ for voice (Discord DAVE encryption).
+PyNaCl>=1.5.0,<1.6
+davey>=0.1.0
 yt-dlp>=2025.12.08

@@ -230,9 +230,13 @@ class VCSystem(commands.Cog, name="VC System"):
                     await self._connect(state, channel)
             except asyncio.TimeoutError:
                 return state, "Connecting to voice timed out — try again in a moment."
-            except discord.ClientException:
+            except (discord.ClientException, RuntimeError):
+                # RuntimeError covers "davey library needed" (missing voice deps).
                 log.warning("Voice connect failed in %s", guild.id, exc_info=True)
-                return state, "I couldn't join that voice channel. Check my permissions."
+                return state, (
+                    "I couldn't join that voice channel — the voice backend may be "
+                    "missing on this host. Check my permissions or the hosting logs."
+                )
             state.text_channel_id = ctx.channel.id
         return state, ""
 
@@ -269,7 +273,7 @@ class VCSystem(commands.Cog, name="VC System"):
                 if self._vc(guild) is None:
                     await self._connect(state, channel)
             log.info("Autojoin: connected to %s in guild %s", channel_id, guild.id)
-        except (discord.ClientException, asyncio.TimeoutError):
+        except (discord.ClientException, RuntimeError, asyncio.TimeoutError):
             log.debug("Autojoin connect failed for guild %s", guild.id, exc_info=True)
 
     # ------------------------------------------------------- playback core
@@ -752,7 +756,7 @@ class VCSystem(commands.Cog, name="VC System"):
                 async with state.lock:
                     if self._vc(guild) is None:
                         await self._connect(state, after.channel)
-        except (discord.ClientException, asyncio.TimeoutError):
+        except (discord.ClientException, RuntimeError, asyncio.TimeoutError):
             log.debug("Autojoin into %s failed in %s", after.channel.id, guild.id, exc_info=True)
 
 
