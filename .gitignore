@@ -41,3 +41,9 @@ Thumbs.db
 
 # Transcripts
 transcripts/
+
+# Local run logs / scratch
+launch.log
+log_bot.*
+log_startup.txt.*
+pyflakes.out

@@ -35,8 +35,9 @@ from utils.embeds import Embeds
 
 log = logging.getLogger("rbx")
 
-# Voice libraries are never used by this bot. Silence the two discord.py voice
-# warnings that otherwise litter every startup in data/rbx_family.log.
+# Voice (music) playback relies on yt-dlp for stream resolution; FFmpeg ships
+# with the hosting container. Silence the two discord.py voice warnings that
+# otherwise litter every startup in data/rbx_family.log.
 logging.getLogger("discord.client").setLevel(logging.CRITICAL)
 logging.getLogger("discord.http").setLevel(logging.CRITICAL)
 
@@ -52,6 +53,7 @@ COGS: tuple[str, ...] = (
     "cogs.tickets",
     "cogs.owner",
     "cogs.autoreply",
+    "cogs.vc",
     "cogs.security",
 )
 

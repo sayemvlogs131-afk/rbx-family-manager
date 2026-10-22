@@ -1,0 +1,760 @@
+"""🔊 Voice (VC) system for RBX Family Manager.
+
+Slash commands for hanging out in a voice channel with the bot:
+
+* ``/join`` and ``/disconnect`` — manual VC control
+* ``/autojoin on|off|status`` — persistent auto-join: whenever the configured
+  member connects to a voice channel, the bot quietly slides in after them
+  (setting survives restarts, stored in ``guild_stats``).
+* ``/play`` — queue a song by name or URL (yt-dlp resolves the audio stream,
+  FFmpeg plays it). Includes queue/skip/pause/volume/loop/shuffle controls.
+
+Design promise: the bot **never leaves a voice channel by itself**. No idle
+timeouts, no "everyone left" checks — it stays until someone runs
+``/disconnect`` (or the whole bot shuts down).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import random
+from collections import deque
+from typing import Any, Optional
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+from utils.embeds import Embeds
+from utils.helpers import truncate
+
+log = logging.getLogger("rbx.vc")
+
+AUTOJOIN_KEY = "vc_autojoin"  # guild_stats key: {"user_id": ..., "channel_id": ...}
+DEFAULT_VOLUME = 0.5  # 50% keeps ears happy; /volume adjusts live
+FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+FFMPEG_OPTS = "-vn"
+
+
+def _fmt_duration(seconds: Any) -> str:
+    """Human readable duration, tolerant of yt-dlp's many response shapes."""
+    try:
+        total = int(float(seconds))
+    except (TypeError, ValueError):
+        return "live"
+    if total <= 0:
+        return "0:00"
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+class MissingMusicSource(RuntimeError):
+    """yt-dlp (the music backend) is not installed on this host."""
+
+
+class Track:
+    """One queued audio source."""
+
+    __slots__ = ("title", "page_url", "stream_url", "duration", "requester_id")
+
+    def __init__(
+        self,
+        title: str,
+        page_url: str,
+        stream_url: str,
+        duration: Any,
+        requester_id: int,
+    ) -> None:
+        self.title = title or "Unknown title"
+        self.page_url = page_url or ""
+        self.stream_url = stream_url
+        self.duration = _fmt_duration(duration)
+        self.requester_id = requester_id
+
+
+def _ydl_resolve(query: str) -> dict:
+    """Blocking yt-dlp lookup — always call through ``asyncio.to_thread``.
+
+    Returns playable title/urls/duration for the first match.
+    Raises :class:`MissingMusicSource` when yt-dlp is not installed.
+    """
+    import re
+
+    try:
+        import yt_dlp
+    except ImportError as exc:  # dependency missing on this host
+        raise MissingMusicSource() from exc
+
+    opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "format": "bestaudio/best",
+        "default_search": "ytsearch1",
+        "nocheckcertificate": True,
+    }
+    target = query.strip()
+    if not re.match(r"^https?://", target):
+        target = f"ytsearch1:{target}"
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(target, download=False)
+
+    if not info:
+        raise LookupError("No results")
+    if "entries" in info:
+        info = next((entry for entry in info["entries"] if entry), None) or {}
+    if not info:
+        raise LookupError("No results")
+    if info.get("is_live"):
+        raise LookupError("Live streams are not supported — pick a normal video")
+
+    stream_url = info.get("url")
+    if stream_url is None:
+        # Some extractors only expose the stream on individual formats.
+        formats = [f for f in (info.get("formats") or []) if f.get("url")]
+        audio = [f for f in formats if (f.get("acodec") or "") != "none"]
+        preferred = audio or formats
+        if preferred:
+            stream_url = preferred[-1].get("url")
+    if stream_url is None:
+        raise LookupError("No audio stream found")
+
+    return {
+        "title": info.get("title") or "Unknown title",
+        "page_url": info.get("webpage_url") or "",
+        "stream_url": stream_url,
+        "duration": info.get("duration"),
+    }
+
+
+class GuildVC:
+    """Per-guild voice session state (all in-memory; queue resets on reboot)."""
+
+    def __init__(self, guild: discord.Guild) -> None:
+        self.guild = guild
+        self.vc: discord.VoiceClient | None = None
+        self.queue: deque[Track] = deque()
+        self.current: Track | None = None
+        self.loop = False
+        self.volume = DEFAULT_VOLUME
+        self.text_channel_id: int | None = None  # where now-playing announcements go
+        self.skip_requested = False
+        self.stop_requested = False
+        self.autojoin_user_id: int | None = None
+        self.lock = asyncio.Lock()  # serialises connect/play state changes
+
+
+class VCSystem(commands.Cog, name="VC System"):
+    """Voice channel + music system (stays connected until /disconnect)."""
+
+    category = "🔊 Voice"
+    category_description = "Join voice channels, autofollow and music playback."
+
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+        self.states: dict[int, GuildVC] = {}
+
+    # ------------------------------------------------------------- helpers
+    def _state(self, guild: discord.Guild) -> GuildVC:
+        state = self.states.get(guild.id)
+        if state is None:
+            state = GuildVC(guild)
+            self.states[guild.id] = state
+        return state
+
+    def _vc(self, guild: discord.Guild) -> discord.VoiceClient | None:
+        """The live voice client for a guild, or None (defensive vs stale refs)."""
+        state = self._state(guild)
+        if state.vc is not None and state.vc.is_connected():
+            return state.vc
+        state.vc = None
+        return None
+
+    async def _notify(self, state: GuildVC, embed: discord.Embed) -> None:
+        """Best-effort announcement into the channel /play was used from."""
+        channel_id = state.text_channel_id
+        if not channel_id:
+            return
+        channel = state.guild.get_channel(channel_id)
+        if isinstance(channel, discord.abc.Messageable):
+            try:
+                await channel.send(embed=embed)
+            except discord.HTTPException:  # pragma: no cover - best effort
+                log.debug("Could not announce in %s", channel_id)
+
+    async def _move(self, vc: discord.VoiceClient, channel: discord.abc.Snowflake) -> None:
+        """move_to with self-deafen; older discord.py versions ignore the flag."""
+        try:
+            await vc.move_to(channel, self_deaf=True)  # type: ignore[call-arg]
+        except TypeError:  # pragma: no cover - older discord.py
+            await vc.move_to(channel)
+
+    async def _connect(self, state: GuildVC, channel) -> None:
+        state.vc = await channel.connect(timeout=20, self_deaf=True)
+
+    async def _ensure_voice(self, ctx: commands.Context, channel=None) -> tuple[GuildVC, str]:
+        """Connect/move the bot into ``channel`` (defaults to the caller's VC).
+
+        Returns the per-guild state plus an error message ("" when fine).
+        """
+        guild = ctx.guild
+        if guild is None:
+            return self._state(guild or ctx), "This command only works inside a server."
+        if channel is None:
+            member_voice = getattr(ctx.author, "voice", None)
+            channel = member_voice and member_voice.channel
+        if channel is None:
+            return self._state(guild), "You must be in a voice channel first (or name one)."
+
+        state = self._state(guild)
+        async with state.lock:
+            vc = self._vc(guild)
+            if vc is not None and vc.channel.id == channel.id:
+                state.text_channel_id = ctx.channel.id
+                return state, ""
+            if vc is not None and vc.is_playing():
+                return state, (
+                    f"I'm busy playing music in **{vc.channel.name}** — "
+                    "use `/disconnect` there first."
+                )
+            try:
+                if vc is not None:
+                    await self._move(vc, channel)
+                else:
+                    await self._connect(state, channel)
+            except asyncio.TimeoutError:
+                return state, "Connecting to voice timed out — try again in a moment."
+            except discord.ClientException:
+                log.warning("Voice connect failed in %s", guild.id, exc_info=True)
+                return state, "I couldn't join that voice channel. Check my permissions."
+            state.text_channel_id = ctx.channel.id
+        return state, ""
+
+    def _can_control(self, ctx: commands.Context) -> tuple[GuildVC | None, str]:
+        """Shared guard: guild only + caller in the bot's voice channel."""
+        guild = ctx.guild
+        if guild is None:
+            return None, "This command only works inside a server."
+        state = self._state(guild)
+        vc = self._vc(guild)
+        if vc is None:
+            return state, "I'm not in a voice channel right now."
+        member_voice = getattr(ctx.author, "voice", None)
+        same_channel = (
+            member_voice and member_voice.channel and member_voice.channel.id == vc.channel.id
+        )
+        perms = getattr(ctx.author, "guild_permissions", None)
+        if not same_channel and not (perms and perms.manage_guild):
+            return state, (
+                f"Join **{vc.channel.name}** first (or have Manage Server) to control the music."
+            )
+        return state, ""
+
+    async def _apply_autojoin(self, guild: discord.Guild, state: GuildVC, channel_id: int) -> None:
+        """Silently connect to the autojoin channel (used on boot and /autojoin on)."""
+        if self._vc(guild) is not None:
+            return
+        channel = guild.get_channel(channel_id)
+        if not isinstance(channel, discord.VoiceChannel):
+            log.debug("Autojoin channel %s missing in guild %s", channel_id, guild.id)
+            return
+        try:
+            async with state.lock:
+                if self._vc(guild) is None:
+                    await self._connect(state, channel)
+            log.info("Autojoin: connected to %s in guild %s", channel_id, guild.id)
+        except (discord.ClientException, asyncio.TimeoutError):
+            log.debug("Autojoin connect failed for guild %s", guild.id, exc_info=True)
+
+    # ------------------------------------------------------- playback core
+    async def _play_next(self, state: GuildVC, announce: bool = True) -> None:
+        """Pop the next queued track and start it (skips broken tracks)."""
+        vc = self._vc(state.guild)
+        if vc is None:
+            return
+
+        attempts = 0
+        while attempts < 5:
+            attempts += 1
+            track = state.queue.popleft() if state.queue else None
+            if track is None:
+                state.current = None
+                return
+            try:
+                audio = discord.FFmpegPCMAudio(
+                    track.stream_url,
+                    before_options=FFMPEG_BEFORE,
+                    options=FFMPEG_OPTS,
+                )
+                source = discord.PCMVolumeTransformer(audio, volume=state.volume)
+            except Exception:
+                log.exception("Failed to open audio stream in guild %s", state.guild.id)
+                await self._notify(
+                    state,
+                    Embeds.error("Track skipped", f"**{track.title}** could not be loaded."),
+                )
+                continue
+
+            state.current = track
+            state.skip_requested = False
+            state.stop_requested = False
+
+            def _finished(_err: Exception | None, _state: GuildVC = state) -> None:
+                fut = asyncio.run_coroutine_threadsafe(self._on_track_end(_state), self.bot.loop)
+                try:
+                    fut.result(timeout=10)
+                except Exception:  # pragma: no cover - defensive
+                    log.exception("Track-end handler crashed")
+
+            try:
+                vc.play(source, after=_finished)
+            except (discord.ClientException, KeyError, RuntimeError) as exc:
+                log.exception("Playback start failed in guild %s", state.guild.id)
+                state.current = None
+                await self._notify(
+                    state,
+                    Embeds.error("Track skipped", f"**{track.title}** failed to start ({exc})."),
+                )
+                continue
+
+            if announce:
+                await self._notify(
+                    state,
+                    Embeds.info(
+                        "▶️ Now playing",
+                        f"**{track.title}**\n`{track.duration}` • <@{track.requester_id}>\n{track.page_url}",
+                    ),
+                )
+            return
+
+        state.current = None
+        state.queue.clear()
+        await self._notify(
+            state,
+            Embeds.error(
+                "Playback stopped",
+                "Several tracks in a row failed to load — I'm staying connected; try `/play` again.",
+            ),
+        )
+
+    async def _on_track_end(self, state: GuildVC) -> None:
+        """Runs after each track finishes/skips: honour loop/skip/stop, continue."""
+        if state.stop_requested:
+            state.current = None
+            state.stop_requested = False
+            state.skip_requested = False
+            await self._notify(
+                state, Embeds.info("🛑 Stopped", "Queue cleared — I'm still in the channel.")
+            )
+            return
+        finished = state.current
+        state.current = None
+        if state.loop and finished is not None and not state.skip_requested:
+            state.queue.appendleft(finished)
+        state.skip_requested = False
+        try:
+            async with state.lock:
+                await self._play_next(state)
+        except Exception:
+            log.exception("Queue continuation failed in %s", state.guild.id)
+
+    # ------------------------------------------------------------- commands
+    @commands.hybrid_command(name="join")
+    @app_commands.describe(channel="Voice channel to join (defaults to the one you're in)")
+    async def join_command(
+        self,
+        ctx: commands.Context,
+        channel: Optional[discord.VoiceChannel] = None,
+    ) -> None:
+        """Join your current voice channel (or any channel you pick)."""
+        if ctx.guild is None:
+            await ctx.send(embed=Embeds.error("Servers only", "Use this inside a server."), ephemeral=True)
+            return
+        state, err = await self._ensure_voice(ctx, channel)
+        if err:
+            await ctx.send(embed=Embeds.error("Can't join", err), ephemeral=True)
+            return
+        voice = self._vc(ctx.guild)
+        target = (channel and channel.name) or (voice and voice.channel and voice.channel.name) or "?"
+        await ctx.send(
+            embed=Embeds.success(
+                "Joined voice",
+                f"I'm in **{target}** and I'll stay until you use `/disconnect`.",
+            )
+        )
+
+    @commands.hybrid_group(name="autojoin")
+    async def autojoin(self, ctx: commands.Context) -> None:
+        """Make the bot follow you into voice automatically."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send(
+                embed=Embeds.info("Autojoin", "Use `/autojoin on`, `/autojoin off` or `/autojoin status`.")
+            )
+
+    @autojoin.command(name="on")
+    async def autojoin_on(self, ctx: commands.Context) -> None:
+        """Enable autojoin: I follow YOU into voice automatically."""
+        if ctx.guild is None:
+            await ctx.send(embed=Embeds.error("Servers only", "Use this inside a server."), ephemeral=True)
+            return
+        member_voice = getattr(ctx.author, "voice", None)
+        channel = member_voice and member_voice.channel
+        if channel is None:
+            await ctx.send(
+                embed=Embeds.error("Join a voice channel", "Hop into a voice channel, then run this."),
+                ephemeral=True,
+            )
+            return
+        state = self._state(ctx.guild)
+        state.autojoin_user_id = ctx.author.id
+        payload = json.dumps({"user_id": ctx.author.id, "channel_id": channel.id})
+        try:
+            await self.bot.db.set_stat(ctx.guild.id, AUTOJOIN_KEY, payload)
+        except Exception:
+            log.exception("Could not save autojoin for guild %s", ctx.guild.id)
+            await ctx.send(embed=Embeds.error("Not saved", "Autojoin couldn't be stored right now."), ephemeral=True)
+            return
+        await ctx.send(
+            embed=Embeds.success(
+                "Autojoin enabled",
+                f"From now on I follow <@{ctx.author.id}> into **{channel.name}** automatically.\n"
+                "This survives restarts — `/autojoin off` disables it.",
+            )
+        )
+        await self._apply_autojoin(ctx.guild, state, channel.id)
+
+    @autojoin.command(name="off")
+    async def autojoin_off(self, ctx: commands.Context) -> None:
+        """Disable autojoin (persists until you switch it back on)."""
+        if ctx.guild is None:
+            await ctx.send(embed=Embeds.error("Servers only", "Use this inside a server."), ephemeral=True)
+            return
+        state = self._state(ctx.guild)
+        state.autojoin_user_id = None
+        try:
+            await self.bot.db.set_stat(ctx.guild.id, AUTOJOIN_KEY, "")
+        except Exception:
+            log.exception("Could not clear autojoin for guild %s", ctx.guild.id)
+            await ctx.send(embed=Embeds.error("Not saved", "Autojoin couldn't be switched off right now."), ephemeral=True)
+            return
+        await ctx.send(embed=Embeds.success("Autojoin disabled", "I'll stop auto-following — you're in control again."))
+
+    @autojoin.command(name="status")
+    async def autojoin_status(self, ctx: commands.Context) -> None:
+        """Show who/where autojoin is bound to right now."""
+        if ctx.guild is None:
+            await ctx.send(embed=Embeds.error("Servers only", "Use this inside a server."), ephemeral=True)
+            return
+        raw = ""
+        try:
+            raw = await self.bot.db.get_stat(ctx.guild.id, AUTOJOIN_KEY, "")
+        except Exception:  # pragma: no cover - defensive
+            log.exception("Could not read autojoin for guild %s", ctx.guild.id)
+        if not raw:
+            await ctx.send(embed=Embeds.info("Autojoin status", "Autojoin is **off**. Turn it on with `/autojoin on`."))
+            return
+        try:
+            data = json.loads(raw)
+            uid = int(data["user_id"])
+            cid = int(data["channel_id"])
+        except (ValueError, TypeError, KeyError):
+            await ctx.send(
+                embed=Embeds.error("Autojoin status", "Stored autojoin config is corrupt — run `/autojoin on` again.")
+            )
+            return
+        channel = ctx.guild.get_channel(cid)
+        name = getattr(channel, "name", "unknown channel")
+        await ctx.send(embed=Embeds.info("Autojoin status", f"I follow <@{uid}> into **{name}** automatically."))
+
+    @commands.hybrid_command(name="play")
+    @commands.cooldown(3, 15, commands.BucketType.user)
+    @app_commands.describe(query="Song name or URL (YouTube/SoundCloud/direct links)")
+    async def play(self, ctx: commands.Context, *, query: str) -> None:
+        """Play a song by link or search text (queues when one is already playing)."""
+        if ctx.guild is None:
+            await ctx.send(embed=Embeds.error("Servers only", "Use this inside a server."), ephemeral=True)
+            return
+        await ctx.defer()
+        state, err = await self._ensure_voice(ctx, None)
+        if err:
+            await ctx.send(embed=Embeds.error("Can't play", err), ephemeral=True)
+            return
+
+        try:
+            entry = await asyncio.to_thread(_ydl_resolve, query)
+        except MissingMusicSource:
+            await ctx.send(
+                embed=Embeds.error(
+                    "Music backend missing",
+                    "yt-dlp is not installed on this host. Add `yt-dlp` to requirements.txt and restart.",
+                )
+            )
+            return
+        except LookupError as exc:
+            await ctx.send(embed=Embeds.error("Not found", f"Could not resolve that song: {exc}"))
+            return
+        except Exception:
+            log.exception("yt-dlp lookup failed for %r", query)
+            await ctx.send(embed=Embeds.error("Lookup failed", "The song lookup crashed — try a different search or link."))
+            return
+
+        track = Track(
+            entry["title"],
+            entry["page_url"],
+            entry["stream_url"],
+            entry["duration"],
+            ctx.author.id,
+        )
+        state.queue.append(track)
+
+        vc = self._vc(ctx.guild)
+        if vc is not None and (vc.is_playing() or vc.is_paused()):
+            await ctx.send(
+                embed=Embeds.success(
+                    "Added to queue",
+                    f"**{track.title}** (`{track.duration}`) — position **{len(state.queue)}**.",
+                )
+            )
+            return
+        try:
+            async with state.lock:
+                await self._play_next(state)
+        except Exception:
+            log.exception("Playback failed in guild %s", ctx.guild.id)
+            await ctx.send(embed=Embeds.error("Playback failed", "Something went wrong while starting the track."))
+            return
+
+    @commands.hybrid_command(name="skip")
+    async def skip(self, ctx: commands.Context) -> None:
+        """Skip the current song (also breaks out of a looping song)."""
+        state, err = self._can_control(ctx)
+        if err:
+            await ctx.send(embed=Embeds.error("Can't skip", err), ephemeral=True)
+            return
+        vc = state.vc
+        if vc is None or (not vc.is_playing() and not vc.is_paused()):
+            await ctx.send(embed=Embeds.error("Nothing to skip", "No track is playing right now."), ephemeral=True)
+            return
+        state.skip_requested = True
+        vc.stop()
+        await ctx.send(embed=Embeds.success("Skipped ⏭️", "Playing the next queued track."))
+
+    @commands.hybrid_command(name="pause")
+    async def pause(self, ctx: commands.Context) -> None:
+        """Pause the music (I stay connected)."""
+        state, err = self._can_control(ctx)
+        if err:
+            await ctx.send(embed=Embeds.error("Can't pause", err), ephemeral=True)
+            return
+        vc = state.vc
+        if vc is None or not vc.is_playing() or vc.is_paused():
+            await ctx.send(embed=Embeds.error("Nothing playing", "There's no track to pause."), ephemeral=True)
+            return
+        vc.pause()
+        await ctx.send(embed=Embeds.success("Paused ⏸️", "Music paused — I'm still here."))
+
+    @commands.hybrid_command(name="resume")
+    async def resume(self, ctx: commands.Context) -> None:
+        """Resume paused music."""
+        state, err = self._can_control(ctx)
+        if err:
+            await ctx.send(embed=Embeds.error("Can't resume", err), ephemeral=True)
+            return
+        vc = state.vc
+        if vc is None or not vc.is_paused():
+            await ctx.send(embed=Embeds.error("Nothing paused", "No paused track right now."), ephemeral=True)
+            return
+        vc.resume()
+        await ctx.send(embed=Embeds.success("Resumed ▶️", "Music is back on."))
+
+    @commands.hybrid_command(name="stop")
+    async def stop(self, ctx: commands.Context) -> None:
+        """Stop playing and empty the queue — but I stay in the voice channel."""
+        state, err = self._can_control(ctx)
+        if err:
+            await ctx.send(embed=Embeds.error("Can't stop", err), ephemeral=True)
+            return
+        state.queue.clear()
+        vc = state.vc
+        if vc is not None and (vc.is_playing() or vc.is_paused()):
+            state.stop_requested = True
+            vc.stop()
+        else:
+            state.current = None
+        await ctx.send(embed=Embeds.success("Stopped 🛑", "Queue cleared. I'm staying connected until `/disconnect`."))
+
+    @commands.hybrid_command(name="disconnect")
+    async def disconnect(self, ctx: commands.Context) -> None:
+        """Disconnect me from voice (the only way I leave unless kicked)."""
+        state, err = self._can_control(ctx)
+        if err:
+            await ctx.send(embed=Embeds.error("Can't disconnect", err), ephemeral=True)
+            return
+        vc = state.vc
+        state.queue.clear()
+        state.current = None
+        state.loop = False
+        state.vc = None
+        if vc is not None:
+            try:
+                await vc.disconnect()
+            except Exception:  # pragma: no cover - best effort cleanup
+                log.exception("Disconnect failed in guild %s", ctx.guild.id)
+        await ctx.send(embed=Embeds.success("Disconnected 👋", "Left the voice channel and cleared the queue."))
+
+    @commands.hybrid_command(name="volume")
+    @app_commands.describe(level="Player volume from 1 to 150 (default 50)")
+    async def volume(self, ctx: commands.Context, level: app_commands.Range[int, 1, 150]) -> None:
+        """Change my playback volume."""
+        state, err = self._can_control(ctx)
+        if err:
+            await ctx.send(embed=Embeds.error("Can't change volume", err), ephemeral=True)
+            return
+        state.volume = level / 100
+        vc = state.vc
+        if vc is not None and isinstance(vc.source, discord.PCMVolumeTransformer):
+            vc.source.volume = state.volume
+        await ctx.send(embed=Embeds.success("Volume set 🔊", f"Playback volume is now **{level}%**"))
+
+    @commands.hybrid_command(name="loop")
+    @app_commands.describe(enabled="on/off (leave empty to toggle)")
+    async def loop_command(self, ctx: commands.Context, enabled: Optional[bool] = None) -> None:
+        """Loop the current song until it's stopped."""
+        state, err = self._can_control(ctx)
+        if err:
+            await ctx.send(embed=Embeds.error("Can't toggle loop", err), ephemeral=True)
+            return
+        state.loop = (not state.loop) if enabled is None else bool(enabled)
+        word = "on 🔁" if state.loop else "off ➡️"
+        await ctx.send(embed=Embeds.success("Loop set", f"Looping is {word}"))
+
+    @commands.hybrid_command(name="shuffle")
+    async def shuffle(self, ctx: commands.Context) -> None:
+        """Shuffle the queued tracks."""
+        state, err = self._can_control(ctx)
+        if err:
+            await ctx.send(embed=Embeds.error("Can't shuffle", err), ephemeral=True)
+            return
+        if len(state.queue) < 2:
+            await ctx.send(embed=Embeds.error("Not enough songs", "Queue at least two tracks to shuffle."), ephemeral=True)
+            return
+        items = list(state.queue)
+        random.shuffle(items)
+        state.queue = deque(items)
+        await ctx.send(embed=Embeds.success("Shuffled 🔀", f"{len(state.queue)} tracks mixed up."))
+
+    @commands.hybrid_command(name="queue")
+    async def queue_list(self, ctx: commands.Context) -> None:
+        """Show what's playing and what's next."""
+        if ctx.guild is None:
+            await ctx.send(embed=Embeds.error("Servers only", "Use this inside a server."), ephemeral=True)
+            return
+        state = self._state(ctx.guild)
+        lines: list[str] = []
+        if state.current is not None:
+            lines.append(
+                f"▶️ **{truncate(state.current.title, 60)}** (`{state.current.duration}`)"
+                + (" *(looped)*" if state.loop else "")
+            )
+        for idx, track in enumerate(list(state.queue)[:10], start=1):
+            lines.append(f"{idx}. **{truncate(track.title, 60)}** (`{track.duration}`)")
+        if len(state.queue) > 10:
+            lines.append(f"…and {len(state.queue) - 10} more")
+        if not lines:
+            await ctx.send(embed=Embeds.info("Music queue", "Nothing playing — use `/play` to start something!"))
+            return
+        await ctx.send(embed=Embeds.info("Music queue", "\n".join(lines)))
+
+    @commands.hybrid_command(name="nowplaying")
+    async def nowplaying(self, ctx: commands.Context) -> None:
+        """Show the current song details."""
+        if ctx.guild is None:
+            await ctx.send(embed=Embeds.error("Servers only", "Use this inside a server."), ephemeral=True)
+            return
+        state = self._state(ctx.guild)
+        track = state.current
+        if track is None:
+            await ctx.send(embed=Embeds.info("Now playing", "Nothing is playing right now — `/play` something!"))
+            return
+        vc = self._vc(ctx.guild)
+        status = "paused ⏸️" if vc is not None and vc.is_paused() else "playing ▶️"
+        description = (
+            f"**{track.title}**\n`{track.duration}` • <@{track.requester_id}> • {status}"
+            + (" • loop 🔁" if state.loop else "")
+        )
+        if track.page_url:
+            description += f"\n{track.page_url}"
+        await ctx.send(embed=Embeds.info("Now playing", description))
+
+    # ------------------------------------------------------------ listeners
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        """Restore persisted autojoin settings after every (re)start."""
+        try:
+            await self._load_autojoins()
+        except Exception:
+            log.exception("Autojoin restore failed", exc_info=True)
+
+    async def _load_autojoins(self) -> None:
+        """Read every guild's saved autojoin config and reconnect."""
+        for guild in self.bot.guilds:
+            try:
+                raw = await self.bot.db.get_stat(guild.id, AUTOJOIN_KEY, "")
+            except Exception:  # pragma: no cover - db not ready yet
+                return
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+                state = self._state(guild)
+                state.autojoin_user_id = int(data["user_id"])
+                await self._apply_autojoin(guild, state, int(data["channel_id"]))
+            except (ValueError, TypeError, KeyError):
+                log.debug("Bad autojoin config for guild %s", guild.id)
+                continue
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        """Autojoin follow + cleanup when the bot is pulled out of voice."""
+        guild = member.guild
+        if member.id == self.bot.user.id:  # type: ignore[union-attr]
+            if after.channel is None:
+                state = self.states.get(guild.id)
+                if state is not None and state.vc is not None and not state.vc.is_connected():
+                    state.vc = None
+                    state.queue.clear()
+                    state.current = None
+            return
+
+        state: GuildVC | None = self.states.get(guild.id)
+        if state is None or state.autojoin_user_id is None or member.id != state.autojoin_user_id:
+            return
+        if after.channel is None or after.channel == before.channel:
+            return
+        vc = self._vc(guild)
+        if vc is not None and vc.channel.id == after.channel.id:
+            return
+        try:
+            if vc is not None:
+                await self._move(vc, after.channel)
+            else:
+                async with state.lock:
+                    if self._vc(guild) is None:
+                        await self._connect(state, after.channel)
+        except (discord.ClientException, asyncio.TimeoutError):
+            log.debug("Autojoin into %s failed in %s", after.channel.id, guild.id, exc_info=True)
+
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(VCSystem(bot))

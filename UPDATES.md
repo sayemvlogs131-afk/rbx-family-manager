@@ -9,6 +9,15 @@ Format rules:
 - Bullet lines start with one of the status emoji: 🟢 Added, 🛠️ Fixed,
   ⚡ Improved, 🔒 Security, 🔴 Critical Issue.
 
+# v2.2.0 — Voice & music system
+
+🟢 Added: `/join` — the bot hops into the voice channel you're in (or any channel you pick).
+🟢 Added: `/autojoin on|off|status` — the bot automatically follows you into voice channels, and the setting survives restarts.
+🟢 Added: `/play` — play any song by name or link (YouTube, SoundCloud and more). Works as a queue so friends can add tracks too.
+🟢 Added: full music controls — `/skip`, `/pause`, `/resume`, `/stop`, `/volume`, `/loop`, `/shuffle`, `/queue`, `/nowplaying`.
+🟢 Added: the bot **never leaves voice by itself** — it stays in the channel (even when idle or alone) until you use `/disconnect`.
+⚡ Improved: music playback now uses yt-dlp + the container's FFmpeg, with automatic skip over broken tracks so the queue never jams.
+
 # v2.1.1 — Server icon
 
 🟢 Added: `/servericon` — see any server's icon in full size (`/servericon full:yes` also shows the server banner).
