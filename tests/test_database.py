@@ -60,6 +60,38 @@ def test_database_reopen_is_idempotent(tmp_path: Path) -> None:
 
 
 # ------------------------------------------------------------- guild settings
+def test_reaction_roles_crud(tmp_path: Path) -> None:
+    async def scenario():
+        database = Database(tmp_path / "roles.db")
+        await database.connect()
+
+        assert await database.add_reaction_role(1, 10, 20, 30, "🎮 Gamer")
+        rows = await database.reaction_roles_for_guild(1)
+        assert len(rows) == 1
+        assert rows[0]["role_id"] == 30
+        assert rows[0]["label"] == "🎮 Gamer"
+
+        # Duplicate role on the same panel is rejected.
+        assert not await database.add_reaction_role(1, 10, 20, 30, "again")
+        # Same role in another guild is fine.
+        assert await database.add_reaction_role(2, 10, 20, 30, "🎮 Gamer")
+        assert len(await database.reaction_roles_for_guild(1)) == 1
+        assert len(await database.reaction_roles_for_guild(2)) == 1
+
+        assert await database.remove_reaction_role(1, 30)
+        assert not await database.remove_reaction_role(1, 999)
+        assert await database.reaction_roles_for_guild(1) == []
+
+        await database.add_reaction_role(1, 10, 20, 31, "a")
+        await database.add_reaction_role(1, 10, 20, 32, "b")
+        assert await database.clear_reaction_roles(1) == 2
+        assert await database.reaction_roles_for_guild(1) == []
+
+        await database.close()
+
+    asyncio.run(scenario())
+
+
 def test_guild_settings_are_isolated_per_guild(tmp_path: Path) -> None:
     async def scenario():
         database = Database(tmp_path / "guilds.db")

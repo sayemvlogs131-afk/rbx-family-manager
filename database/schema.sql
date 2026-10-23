@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS guild_settings (
     leave_message           TEXT,
     leave_embed             INTEGER NOT NULL DEFAULT 1,
     autorole_id             INTEGER,
+    reaction_channel        INTEGER,
+    reaction_message        INTEGER,
+    reaction_title          TEXT,
+    reaction_description    TEXT,
     ticket_category_id      INTEGER,
     ticket_staff_role_id    INTEGER,    ticket_counter          INTEGER NOT NULL DEFAULT 0,
     created_at              TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -191,6 +195,19 @@ CREATE TABLE IF NOT EXISTS afk (
     since       INTEGER NOT NULL,
     PRIMARY KEY (guild_id, user_id)
 );
+
+-- ------------------------------- Reaction roles ---------------------------
+-- Role self-serve panels: one message per guild whose buttons grant/remove roles.
+
+CREATE TABLE IF NOT EXISTS reaction_roles (
+    guild_id    INTEGER NOT NULL,
+    channel_id  INTEGER NOT NULL,
+    message_id  INTEGER NOT NULL,
+    role_id     INTEGER NOT NULL,
+    label       TEXT    NOT NULL,
+    PRIMARY KEY (guild_id, role_id)
+);
+CREATE INDEX IF NOT EXISTS idx_reaction_roles_guild ON reaction_roles(guild_id, message_id);
 
 -- ------------------------------- Leveling ---------------------------------
 

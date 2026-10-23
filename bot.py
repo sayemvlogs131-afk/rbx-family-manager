@@ -51,6 +51,7 @@ COGS: tuple[str, ...] = (
     "cogs.leveling",
     "cogs.server",
     "cogs.welcome",
+    "cogs.reactionroles",
     "cogs.tickets",
     "cogs.owner",
     "cogs.autoreply",

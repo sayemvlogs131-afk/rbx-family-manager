@@ -9,6 +9,12 @@ Format rules:
 - Bullet lines start with one of the status emoji: 🟢 Added, 🛠️ Fixed,
   ⚡ Improved, 🔒 Security, 🔴 Critical Issue.
 
+# v2.4.0 — Reaction roles: self-serve role panels
+
+🟢 Added: `/rolesetup setup channel:` — creates a role panel: a message with one button per role. Members click to get the role and click again to remove it — no staff needed, no pinging mods.
+🟢 Added: `/rolesetup add role: label:` (up to 25 roles per panel), `/rolesetup remove role:`, `/rolesetup list` and `/rolesetup reset`.
+⚡ Improved: panels are persistent — buttons keep working after bot restarts and panel re-images because every panel is rebuilt from the database on boot. Panels also clean themselves up if a role on them gets deleted.
+
 # v2.3.0 — Power update: leveling, scam shield, music recovery, full logger
 
 🟢 Added: `/rank` and `/leaderboard` — members earn XP by chatting (one gain per minute), levels auto-grant configured roles via `/rankrole add level: role:`, and level-up announcements go anywhere you set with `/levelsetup channel:`. Backed by a new indexed `user_levels` table.

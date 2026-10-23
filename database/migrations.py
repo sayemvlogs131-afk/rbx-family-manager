@@ -17,7 +17,7 @@ import aiosqlite
 log = logging.getLogger("rbx.migrations")
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
-LATEST_VERSION = 8
+LATEST_VERSION = 9
 
 
 async def _has_column(db: aiosqlite.Connection, table: str, column: str) -> bool:
@@ -122,6 +122,36 @@ async def _migration_8(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
+async def _migration_9(db: aiosqlite.Connection) -> None:
+    """Reaction roles: self-serve role panels created with /rolesetup."""
+    panel_columns = (
+        ("guild_settings", "reaction_channel", "INTEGER"),
+        ("guild_settings", "reaction_message", "INTEGER"),
+        ("guild_settings", "reaction_title", "TEXT"),
+        ("guild_settings", "reaction_description", "TEXT"),
+    )
+    for table, column, definition in panel_columns:
+        if not await _has_column(db, table, column):
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reaction_roles (
+            guild_id    INTEGER NOT NULL,
+            channel_id  INTEGER NOT NULL,
+            message_id  INTEGER NOT NULL,
+            role_id     INTEGER NOT NULL,
+            label       TEXT    NOT NULL,
+            PRIMARY KEY (guild_id, role_id)
+        )
+        """
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reaction_roles_message "
+        "ON reaction_roles(guild_id, message_id)"
+    )
+    await db.commit()
+
+
 # Migrations 2+ are coroutines so column checks run for real instead of
 # relying on conditional DDL (SQLite cannot do "ADD COLUMN IF NOT EXISTS").
 _MIGRATIONS: dict[int, object] = {
@@ -133,6 +163,7 @@ _MIGRATIONS: dict[int, object] = {
     6: _migration_6,
     7: _migration_7,
     8: _migration_8,
+    9: _migration_9,
 }
 
 

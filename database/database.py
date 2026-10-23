@@ -800,4 +800,40 @@ class Database:
         return cur.rowcount > 0
 
 
+    # ------------------------------------------------------- reaction roles
+    async def add_reaction_role(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        role_id: int,
+        label: str,
+    ) -> bool:
+        cur = await self.execute(
+            "INSERT OR IGNORE INTO reaction_roles"
+            "(guild_id, channel_id, message_id, role_id, label) VALUES (?, ?, ?, ?, ?)",
+            (guild_id, channel_id, message_id, role_id, label),
+        )
+        return cur.rowcount > 0
+
+    async def remove_reaction_role(self, guild_id: int, role_id: int) -> bool:
+        cur = await self.execute(
+            "DELETE FROM reaction_roles WHERE guild_id = ? AND role_id = ?",
+            (guild_id, role_id),
+        )
+        return cur.rowcount > 0
+
+    async def reaction_roles_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
+        return await self.fetchall(
+            "SELECT * FROM reaction_roles WHERE guild_id = ? ORDER BY message_id, rowid",
+            (guild_id,),
+        )
+
+    async def clear_reaction_roles(self, guild_id: int) -> int:
+        cur = await self.execute(
+            "DELETE FROM reaction_roles WHERE guild_id = ?", (guild_id,)
+        )
+        return cur.rowcount
+
+
 __all__ = ["Database", "utcnow"]

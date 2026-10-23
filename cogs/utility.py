@@ -107,6 +107,7 @@ COMMAND_CATEGORY: dict[str, str] = {
     "/emergencylockdown": "🔒 Security",
     "/ticket": "⚙️ Server",
     "/welcome": "⚙️ Server",
+    "/rolesetup": "⚙️ Server",
     "/autorole": "⚙️ Server",
     "/setlogchannel": "⚙️ Server",
     "/owner": "🤖 Bot",
