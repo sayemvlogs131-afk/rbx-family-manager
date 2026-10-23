@@ -32,6 +32,33 @@ from utils.time_parser import format_duration, parse_duration
 
 log = logging.getLogger("rbx.automod")
 
+# Known scam / phishing link patterns (reused across guilds, kept short and
+# deliberately fuzzy — scam shops re-register lookalike domains weekly).
+_SCAM_TOKENS = [
+    "free-nitro",
+    "nitrogift",
+    "nitro-gift",
+    "discordgift",
+    "discord-gift",
+    "steamcomunity",
+    "steamcomnunity",
+    "steamconmunity",
+    "stearncommunity",
+    "steamcomunuity",
+    "steampowerd",
+    "csgo-skin",
+    "csgocase",
+    "case-exchange",
+    "skin-daily",
+    "robuxgenerator",
+    "robux-generat",
+    "free-robux",
+    "blox.claims",
+]
+SCAM_RE = re.compile(
+    "|".join(re.escape(token) for token in _SCAM_TOKENS), re.IGNORECASE
+)
+
 DEFAULT_SETTINGS: dict[str, Any] = {
     "enabled": 1,
     "anti_spam": 1,
@@ -44,6 +71,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "caps_limit": 70,
     "caps_min_length": 12,
     "invite_filter": 1,
+    "scam_filter": 1,
     "link_filter": 0,
     "banned_words": [],
     "warn_threshold": 3,
@@ -145,6 +173,12 @@ def evaluate_automod(
     # ---- invite links ---------------------------------------------------
     if config_map.get("invite_filter", 1) and INVITE_RE.search(text):
         return Violation("invite", "Invite links are not allowed here.")
+
+    # ---- scam / phishing links ------------------------------------------
+    # Runs before the generic filters because scam links are the *first*
+    # thing we want to catch (they do the most damage per message).
+    if config_map.get("scam_filter", 1) and SCAM_RE.search(text):
+        return Violation("scam", "That message contains a known scam/phishing link.", points=3)
 
     # ---- generic links --------------------------------------------------
     if config_map.get("link_filter", 0) and URL_RE.search(text):
@@ -343,6 +377,7 @@ class Automod(commands.Cog, name="Automod"):
             ("anti_spam", "Anti-spam (message flood)"),
             ("duplicate_filter", "Duplicate messages"),
             ("invite_filter", "Invite links"),
+            ("scam_filter", "Scam/phishing links"),
             ("link_filter", "Any links"),
         ]
         for key, label in toggles:
@@ -378,6 +413,7 @@ class Automod(commands.Cog, name="Automod"):
             app_commands.Choice(name="anti-spam", value="anti_spam"),
             app_commands.Choice(name="duplicate messages", value="duplicate_filter"),
             app_commands.Choice(name="invite links", value="invite_filter"),
+            app_commands.Choice(name="scam/phishing links", value="scam_filter"),
             app_commands.Choice(name="all links", value="link_filter"),
             app_commands.Choice(name="delete violations", value="delete_violations"),
             app_commands.Choice(name="log violations", value="log_violations"),

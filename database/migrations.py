@@ -17,7 +17,7 @@ import aiosqlite
 log = logging.getLogger("rbx.migrations")
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
-LATEST_VERSION = 7
+LATEST_VERSION = 8
 
 
 async def _has_column(db: aiosqlite.Connection, table: str, column: str) -> bool:
@@ -99,6 +99,29 @@ async def _migration_7(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
+async def _migration_8(db: aiosqlite.Connection) -> None:
+    """Leveling system table + scam-link filter toggle in automod."""
+    if not await _has_column(db, "automod_config", "scam_filter"):
+        await db.execute(
+            "ALTER TABLE automod_config ADD COLUMN scam_filter INTEGER NOT NULL DEFAULT 1"
+        )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_levels (
+            guild_id    INTEGER NOT NULL,
+            user_id     INTEGER NOT NULL,
+            xp          INTEGER NOT NULL DEFAULT 0,
+            last_xp_at  INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
+        )
+        """
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_levels_guild_xp ON user_levels(guild_id, xp DESC)"
+    )
+    await db.commit()
+
+
 # Migrations 2+ are coroutines so column checks run for real instead of
 # relying on conditional DDL (SQLite cannot do "ADD COLUMN IF NOT EXISTS").
 _MIGRATIONS: dict[int, object] = {
@@ -109,6 +132,7 @@ _MIGRATIONS: dict[int, object] = {
     5: _migration_5,
     6: _migration_6,
     7: _migration_7,
+    8: _migration_8,
 }
 
 

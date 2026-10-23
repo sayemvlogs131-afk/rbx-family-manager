@@ -9,6 +9,14 @@ Format rules:
 - Bullet lines start with one of the status emoji: 🟢 Added, 🛠️ Fixed,
   ⚡ Improved, 🔒 Security, 🔴 Critical Issue.
 
+# v2.3.0 — Power update: leveling, scam shield, music recovery, full logger
+
+🟢 Added: `/rank` and `/leaderboard` — members earn XP by chatting (one gain per minute), levels auto-grant configured roles via `/rankrole add level: role:`, and level-up announcements go anywhere you set with `/levelsetup channel:`. Backed by a new indexed `user_levels` table.
+🟢 Added: music recovery — after a restart or crash the bot rejoins its last voice channel and re-resolves the whole saved queue (up to 20 tracks) automatically; saved volume and loop too. Music survives panel re-images and reboots.
+🟢 Added: scam/phishing blocker — known scam-shop domains (fake nitro/steam/robux shops and more) are deleted the moment they're posted (3 violation points). On by default; toggle in `/automod`.
+🟢 Added: even more complete server log — webhook changes, thread creation, and server settings renamed now all logged too.
+⚡ Improved: `/owner backup` snapshots the database instantly (auto snapshots every 6h already).
+
 # v2.2.3 — /join fix + database power-up
 
 🛠️ Fixed: `/join` failed with a 404 when joining voice took longer than 3 seconds — the bot now defers the reply first, so joining always responds cleanly no matter how slow the connection.

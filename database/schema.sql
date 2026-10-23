@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS automod_config (
     caps_limit              INTEGER NOT NULL DEFAULT 70,
     caps_min_length         INTEGER NOT NULL DEFAULT 12,
     invite_filter           INTEGER NOT NULL DEFAULT 1,
+    scam_filter             INTEGER NOT NULL DEFAULT 1,
     link_filter             INTEGER NOT NULL DEFAULT 0,
     banned_words            TEXT    NOT NULL DEFAULT '[]',
     warn_threshold          INTEGER NOT NULL DEFAULT 3,
@@ -190,6 +191,17 @@ CREATE TABLE IF NOT EXISTS afk (
     since       INTEGER NOT NULL,
     PRIMARY KEY (guild_id, user_id)
 );
+
+-- ------------------------------- Leveling ---------------------------------
+
+CREATE TABLE IF NOT EXISTS user_levels (
+    guild_id    INTEGER NOT NULL,
+    user_id     INTEGER NOT NULL,
+    xp          INTEGER NOT NULL DEFAULT 0,
+    last_xp_at  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_levels_guild_xp ON user_levels(guild_id, xp DESC);
 
 -- ------------------------------- Auto replies -----------------------------
 

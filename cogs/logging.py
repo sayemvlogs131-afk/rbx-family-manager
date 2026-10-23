@@ -472,6 +472,73 @@ class Logging(commands.Cog, name="Logging"):
         embed = Embeds.log(title, "", color=color, fields=fields, actor=member)
         await self.bot.log_to_channel(member.guild, "server_log_channel", embed)
 
+    # -------------------------------------------------------------- webhooks
+    @commands.Cog.listener()
+    async def on_webhooks_update(self, channel: discord.TextChannel) -> None:
+        """Any webhook create/delete/edit in a channel — prime backdoor signal."""
+        webhooks = []
+        try:
+            webhooks = await channel.webhooks()
+        except discord.HTTPException:  # pragma: no cover - best effort
+            pass
+        listing = "\n".join(
+            f"• `{w.name or 'unnamed'}` (by {f'<@{w.user.id}>' if w.user else '?uid'})"
+            for w in webhooks[:10]
+        ) or "_none readable_"
+        embed = Embeds.log(
+            "Webhooks changed",
+            listing,
+            color=0xFEE75C,
+            fields=[("Channel", channel.mention, True)],
+        )
+        await self.bot.log_to_channel(channel.guild, "server_log_channel", embed)
+
+    # --------------------------------------------------------------- threads
+    @commands.Cog.listener()
+    async def on_thread_create(self, thread: discord.Thread) -> None:
+        embed = Embeds.log(
+            "Thread created",
+            "",
+            fields=[
+                ("Thread", f"`{thread.name}`", True),
+                ("Starter", getattr(thread.starter_message, "author", "?") if thread.starter_message else "`—`", True),
+            ],
+        )
+        await self.bot.log_to_channel(thread.guild, "server_log_channel", embed)
+
+    @commands.Cog.listener()
+    async def on_thread_join(self, thread: discord.Thread) -> None:
+        # Fires for bots only when we gain access to an existing thread.
+        embed = Embeds.log(
+            "Bot joined a thread",
+            f"`{thread.name}`",
+            fields=[("ID", f"`{thread.id}`", True)],
+        )
+        await self.bot.log_to_channel(thread.guild, "server_log_channel", embed)
+
+    # ----------------------------------------------------------------- guild
+    @commands.Cog.listener()
+    async def on_guild_update(self, before: discord.Guild, after: discord.Guild) -> None:
+        changes: list[str] = []
+        if before.name != after.name:
+            changes.append(f"Name: `{before.name}` → `{after.name}`")
+        if before.description != after.description:
+            changes.append("Description changed")
+        if before.verification_level != after.verification_level:
+            changes.append(
+                f"Verification: `{before.verification_level.name}` → `{after.verification_level.name}`"
+            )
+        if before.rules_channel != after.rules_channel:
+            changes.append("Rules channel changed")
+        if not changes:
+            return
+        embed = Embeds.log(
+            "Server settings updated",
+            "\n".join(changes),
+            fields=[("Server ID", f"`{after.id}`", True)],
+        )
+        await self.bot.log_to_channel(after, "server_log_channel", embed)
+
 
 def _can_send(channel: discord.abc.Messageable, member: Optional[discord.Member]) -> bool:
     if member is None or not isinstance(channel, discord.TextChannel):

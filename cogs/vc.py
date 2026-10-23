@@ -35,6 +35,8 @@ from utils.helpers import truncate
 log = logging.getLogger("rbx.vc")
 
 AUTOJOIN_KEY = "vc_autojoin"  # guild_stats key: {"user_id": ..., "channel_id": ...}
+SESSION_KEY = "vc_session"   # guild_stats key: {"channel_id": ..., "volume":...,"tracks": [queries]}
+RESTORE_LIMIT = 20  # max tracks re-resolved after a restart
 DEFAULT_VOLUME = 0.5  # 50% keeps ears happy; /volume adjusts live
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 FFMPEG_OPTS = "-vn"
@@ -150,7 +152,7 @@ def _ydl_extract(yt_dlp: Any, target: str) -> dict[str, Any]:
 class Track:
     """One queued audio source."""
 
-    __slots__ = ("title", "page_url", "stream_url", "duration", "requester_id")
+    __slots__ = ("title", "page_url", "stream_url", "duration", "requester_id", "query")
 
     def __init__(
         self,
@@ -159,12 +161,14 @@ class Track:
         stream_url: str,
         duration: Any,
         requester_id: int,
+        query: str = "",
     ) -> None:
         self.title = title or "Unknown title"
         self.page_url = page_url or ""
         self.stream_url = stream_url
         self.duration = _fmt_duration(duration)
         self.requester_id = requester_id
+        self.query = query  # original search text/URL, used for restart recovery
 
 
 def _ydl_resolve(query: str) -> dict:
@@ -230,6 +234,7 @@ class GuildVC:
         self.current: Track | None = None
         self.loop = False
         self.volume = DEFAULT_VOLUME
+        self.session_channel_id: int | None = None  # last voice channel (restart recovery)
         self.text_channel_id: int | None = None  # where now-playing announcements go
         self.skip_requested = False
         self.stop_requested = False
@@ -262,6 +267,100 @@ class VCSystem(commands.Cog, name="VC System"):
             return state.vc
         state.vc = None
         return None
+
+    # -------------------------------------------------- restart recovery
+    async def _save_session(self, guild: discord.Guild, state: GuildVC) -> None:
+        """Persist the queue (as resolvable queries) so a restart keeps music."""
+        vc = self._vc(guild)
+        channel_id = getattr(getattr(vc, "channel", None), "id", None) or state.session_channel_id
+        if channel_id is None and not state.queue and state.current is None:
+            try:
+                await self.bot.db.set_stat(guild.id, SESSION_KEY, "")
+            except Exception:
+                log.debug("Could not clear session for guild %s", guild.id, exc_info=True)
+            return
+        tracks = []
+        if state.current is not None and state.current.query:
+            tracks.append(state.current.query)
+        tracks.extend(t.query for t in list(state.queue)[:RESTORE_LIMIT] if t.query)
+        payload: dict[str, Any] = {
+            "channel_id": channel_id,
+            "volume": round(state.volume, 2),
+            "loop": state.loop,
+            "tracks": tracks,
+        }
+        try:
+            await self.bot.db.set_stat(guild.id, SESSION_KEY, json.dumps(payload))
+        except Exception:
+            log.debug("Could not save session for guild %s", guild.id, exc_info=True)
+
+    async def _restore_session(self, guild: discord.Guild) -> None:
+        """After a restart: rejoin the saved channel and replay the saved queue."""
+        state = self._state(guild)
+        try:
+            raw = await self.bot.db.get_stat(guild.id, SESSION_KEY, "")
+        except Exception:  # db not ready yet
+            return
+        if not raw:
+            return
+        try:
+            payload = json.loads(raw)
+            channel_id = int(payload["channel_id"])
+            raw_tracks = list(payload.get("tracks") or [])[:RESTORE_LIMIT]
+            if not channel_id or not self._is_voice_channel(guild, channel_id):
+                return
+            state.volume = float(payload.get("volume") or DEFAULT_VOLUME)
+            state.loop = bool(payload.get("loop"))
+        except (ValueError, TypeError, KeyError):
+            log.debug("Bad session data for guild %s", guild.id)
+            return
+
+        # Rejoin + resolve tracks in the background so on_ready is not blocked.
+        state.session_channel_id = channel_id
+        asyncio.create_task(self._resume_playback(guild, state, channel_id, raw_tracks))
+
+    def _is_voice_channel(self, guild: discord.Guild, channel_id: int) -> bool:
+        return isinstance(guild.get_channel(channel_id), discord.VoiceChannel)
+
+    async def _resume_playback(
+        self, guild: discord.Guild, state: GuildVC, channel_id: int, queries: list[str]
+    ) -> None:
+        """Background task: reconnect and re-resolve the saved queue."""
+        try:
+            async with state.lock:
+                if self._vc(guild) is None:
+                    channel = guild.get_channel(channel_id)
+                    if not isinstance(channel, discord.VoiceChannel):
+                        return
+                    await self._connect(state, channel)
+                    state.session_channel_id = channel_id
+            for index, query in enumerate(queries):
+                if not self._vc(guild):  # disconnected while restoring
+                    return
+                try:
+                    entry = await asyncio.to_thread(_ydl_resolve, query)
+                except Exception:
+                    log.debug("Restore lookup failed for %r", query, exc_info=True)
+                    continue
+                track = Track(
+                    entry["title"],
+                    entry["page_url"],
+                    entry["stream_url"],
+                    entry["duration"],
+                    0,  # requester unknown after restart
+                    query=query,
+                )
+                async with state.lock:
+                    if index == 0 and not (self._vc(guild) and (self._vc(guild).is_playing() or self._vc(guild).is_paused())):
+                        state.queue.appendleft(track)
+                        state.current = None
+                        await self._play_next(state, announce=True)
+                    else:
+                        state.queue.append(track)
+                        self.bot.loop.create_task(self._save_session(guild, state))
+            log.info("Session restored in guild %s (%s track(s))", guild.id, len(queries))
+        except Exception:
+            log.exception("Session restore failed in guild %s", guild.id)
 
     async def _notify(self, state: GuildVC, embed: discord.Embed) -> None:
         """Best-effort announcement into the channel /play was used from."""
@@ -304,6 +403,7 @@ class VCSystem(commands.Cog, name="VC System"):
             vc = self._vc(guild)
             if vc is not None and vc.channel.id == channel.id:
                 state.text_channel_id = ctx.channel.id
+                state.session_channel_id = channel.id
                 return state, ""
             if vc is not None and vc.is_playing():
                 return state, (
@@ -325,6 +425,7 @@ class VCSystem(commands.Cog, name="VC System"):
                     "missing on this host. Check my permissions or the hosting logs."
                 )
             state.text_channel_id = ctx.channel.id
+            state.session_channel_id = channel.id
         return state, ""
 
     def _can_control(self, ctx: commands.Context) -> tuple[GuildVC | None, str]:
@@ -359,6 +460,7 @@ class VCSystem(commands.Cog, name="VC System"):
             async with state.lock:
                 if self._vc(guild) is None:
                     await self._connect(state, channel)
+            state.session_channel_id = channel_id
             log.info("Autojoin: connected to %s in guild %s", channel_id, guild.id)
         except (discord.ClientException, RuntimeError, asyncio.TimeoutError):
             log.debug("Autojoin connect failed for guild %s", guild.id, exc_info=True)
@@ -456,6 +558,7 @@ class VCSystem(commands.Cog, name="VC System"):
         try:
             async with state.lock:
                 await self._play_next(state)
+            await self._save_session(state.guild, state)
         except Exception:
             log.exception("Queue continuation failed in %s", state.guild.id)
 
@@ -513,6 +616,7 @@ class VCSystem(commands.Cog, name="VC System"):
             return
         state = self._state(ctx.guild)
         state.autojoin_user_id = ctx.author.id
+        state.session_channel_id = channel.id
         payload = json.dumps({"user_id": ctx.author.id, "channel_id": channel.id})
         try:
             await self.bot.db.set_stat(ctx.guild.id, AUTOJOIN_KEY, payload)
@@ -624,8 +728,14 @@ class VCSystem(commands.Cog, name="VC System"):
             entry["stream_url"],
             entry["duration"],
             ctx.author.id,
+            query=query,
         )
         state.queue.append(track)
+        # Persist the queue so a restart/crash keeps the music session alive.
+        try:
+            await self._save_session(ctx.guild, state)
+        except Exception:  # pragma: no cover - defensive
+            log.debug("Session save failed in guild %s", ctx.guild.id, exc_info=True)
 
         vc = self._vc(ctx.guild)
         if vc is not None and (vc.is_playing() or vc.is_paused()):
@@ -695,12 +805,14 @@ class VCSystem(commands.Cog, name="VC System"):
             await ctx.send(embed=Embeds.error("Can't stop", err), ephemeral=True)
             return
         state.queue.clear()
+        state.current = None
         vc = state.vc
         if vc is not None and (vc.is_playing() or vc.is_paused()):
             state.stop_requested = True
             vc.stop()
         else:
             state.current = None
+        await self._save_session(ctx.guild, state)
         await ctx.send(embed=Embeds.success("Stopped 🛑", "Queue cleared. I'm staying connected until `/disconnect`."))
 
     @commands.hybrid_command(name="disconnect")
@@ -715,6 +827,10 @@ class VCSystem(commands.Cog, name="VC System"):
         state.current = None
         state.loop = False
         state.vc = None
+        try:
+            await self.bot.db.set_stat(ctx.guild.id, SESSION_KEY, "")
+        except Exception:  # pragma: no cover - defensive
+            log.debug("Could not clear session in guild %s", ctx.guild.id, exc_info=True)
         if vc is not None:
             try:
                 await vc.disconnect()
@@ -809,11 +925,17 @@ class VCSystem(commands.Cog, name="VC System"):
     # ------------------------------------------------------------ listeners
     @commands.Cog.listener()
     async def on_ready(self) -> None:
-        """Restore persisted autojoin settings after every (re)start."""
+        """Restore persisted autojoin settings and music sessions after restart."""
         try:
             await self._load_autojoins()
         except Exception:
             log.exception("Autojoin restore failed", exc_info=True)
+        # Music recovery: rejoin + re-resolve the saved queue (background).
+        for guild in self.bot.guilds:
+            try:
+                await self._restore_session(guild)
+            except Exception:  # pragma: no cover - defensive
+                log.exception("Session restore failed for guild %s", guild.id)
 
     async def _load_autojoins(self) -> None:
         """Read every guild's saved autojoin config and reconnect."""
@@ -849,6 +971,10 @@ class VCSystem(commands.Cog, name="VC System"):
                     state.vc = None
                     state.queue.clear()
                     state.current = None
+                    try:
+                        await self.bot.db.set_stat(guild.id, SESSION_KEY, "")
+                    except Exception:
+                        log.debug("Could not clear session in guild %s", guild.id, exc_info=True)
             return
 
         state: GuildVC | None = self.states.get(guild.id)

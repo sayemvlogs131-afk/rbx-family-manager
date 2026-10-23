@@ -54,6 +54,7 @@ DEFAULT_AUTOMOD_ROW: dict[str, Any] = {
     "caps_limit": 70,
     "caps_min_length": 12,
     "invite_filter": 1,
+    "scam_filter": 1,
     "link_filter": 0,
     "banned_words": "[]",
     "warn_threshold": 3,
@@ -727,6 +728,33 @@ class Database:
             "SELECT role_id FROM ignored_roles WHERE guild_id = ?", (guild_id,)
         )
         return [int(r["role_id"]) for r in rows]
+
+    # ------------------------------------------------------------- leveling
+    async def get_level(self, guild_id: int, user_id: int) -> dict[str, Any]:
+        row = await self.fetchone(
+            "SELECT xp, last_xp_at FROM user_levels WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        if row is None:
+            return {"xp": 0, "last_xp_at": 0}
+        return row
+
+    async def set_level_xp(
+        self, guild_id: int, user_id: int, xp: int, last_xp_at: int = 0
+    ) -> None:
+        await self.execute(
+            "INSERT INTO user_levels(guild_id, user_id, xp, last_xp_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET xp = excluded.xp, "
+            "last_xp_at = excluded.last_xp_at",
+            (guild_id, user_id, int(xp), int(last_xp_at)),
+        )
+
+    async def top_levels(self, guild_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        return await self.fetchall(
+            "SELECT user_id, xp FROM user_levels WHERE guild_id = ? "
+            "ORDER BY xp DESC LIMIT ?",
+            (guild_id, limit),
+        )
 
     # ----------------------------------------------------------------- AFK
     async def set_afk(self, guild_id: int, user_id: int, message: str, since: int) -> None:
