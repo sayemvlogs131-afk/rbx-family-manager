@@ -9,6 +9,13 @@ Format rules:
 - Bullet lines start with one of the status emoji: 🟢 Added, 🛠️ Fixed,
   ⚡ Improved, 🔒 Security, 🔴 Critical Issue.
 
+# v2.2.3 — /join fix + database power-up
+
+🛠️ Fixed: `/join` failed with a 404 when joining voice took longer than 3 seconds — the bot now defers the reply first, so joining always responds cleanly no matter how slow the connection.
+🟢 Added: automatic database backups — a full snapshot is written to `data/backups/` right after every boot and every 6 hours after that; the newest 7 are kept, older ones auto-delete. Server data wipes can no longer lose everything.
+🟢 Added: `/owner backup` — the bot owner can snapshot the database at any moment with one command.
+⚡ Improved: the database now has speed indexes on warnings, tickets, giveaways, reminders, auto-replies and the security audit trail — noticeably snappy as data grows.
+
 # v2.2.2 — Everything-on-GitHub update + /scan
 
 🟢 Added: `/scan` — owner-only full server audit in one embed: members, channels, roles, automod/anti-nuke settings, log channels, welcome, tickets, giveaways, warnings count and an auto-generated **Problems found** list (broken config references, missing bot permissions, unreachable role position).

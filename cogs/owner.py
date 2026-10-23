@@ -43,7 +43,7 @@ class Owner(commands.Cog, name="Bot"):
         await ctx.send(
             embed=Embeds.info(
                 "Owner commands",
-                "`/owner reload cog:` • `/owner sync` • `/owner shutdown` • "
+                "`/owner reload cog:` • `/owner sync` • `/owner backup` • `/owner shutdown` • "
                 "`/owner guilds` • `/owner status` • `/owner say` • `/owner broadcast`",
             ),
             ephemeral=True,
@@ -119,6 +119,27 @@ class Owner(commands.Cog, name="Bot"):
                 "Global sync complete",
                 f"**{len(synced)}** command(s) synced. Global updates can take up to an hour.",
             )
+        )
+
+    @owner.command(name="backup")
+    @owner_only()
+    async def owner_backup(self, ctx: commands.Context) -> None:
+        """Snapshot the database right now into data/backups/ (keeps last 7)."""
+        await ctx.defer(ephemeral=True)
+        dest = await self.bot.db.backup()
+        if dest is None:
+            await ctx.send(
+                embed=Embeds.error("Backup failed", "Check the console log — the snapshot could not be written."),
+                ephemeral=True,
+            )
+            return
+        await ctx.send(
+            embed=Embeds.success(
+                "Backup created 🗄️",
+                f"Saved **{dest.name}** in `data/backups/`. "
+                f"The bot also auto-snapshots every 6 hours and keeps the newest {self.bot.db.backup_keep} files.",
+            ),
+            ephemeral=True,
         )
 
     @owner.command(name="shutdown")

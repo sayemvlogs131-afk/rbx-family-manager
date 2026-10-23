@@ -78,7 +78,7 @@ BOT_NAME = "RBX Family Manager"
 BOT_DESCRIPTION = (
     "The all-in-one management, moderation, giveaway, utility and fun bot for RBX Family."
 )
-BOT_VERSION = "2.2.2"
+BOT_VERSION = "2.2.3"
 DEFAULT_STATUS_TEXT = "RBX Family | /help"
 SUPPORT_SERVER: str = _get("SUPPORT_SERVER", "")
 # Human-readable release notes parsed by the update-announcer (cogs.security).

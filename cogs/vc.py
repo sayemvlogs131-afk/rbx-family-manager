@@ -468,11 +468,15 @@ class VCSystem(commands.Cog, name="VC System"):
         channel: Optional[discord.VoiceChannel] = None,
     ) -> None:
         """Join your current voice channel (or any channel you pick)."""
+        # Connecting to voice can take a few seconds; without a defer Discord
+        # expires the interaction at 3s and the reply 404s (Unknown interaction).
+        await ctx.defer(ephemeral=True)
         if ctx.guild is None:
-            await ctx.send(embed=Embeds.error("Servers only", "Use this inside a server."), ephemeral=True)
+            await ctx.send(embed=Embeds.error("Servers only", "Use this inside a server."))
             return
         state, err = await self._ensure_voice(ctx, channel)
         if err:
+            # Deferred above: send as followup (ephemeral flag rides the defer).
             await ctx.send(embed=Embeds.error("Can't join", err), ephemeral=True)
             return
         voice = self._vc(ctx.guild)
@@ -495,8 +499,9 @@ class VCSystem(commands.Cog, name="VC System"):
     @autojoin.command(name="on")
     async def autojoin_on(self, ctx: commands.Context) -> None:
         """Enable autojoin: I follow YOU into voice automatically."""
+        await ctx.defer(ephemeral=True)
         if ctx.guild is None:
-            await ctx.send(embed=Embeds.error("Servers only", "Use this inside a server."), ephemeral=True)
+            await ctx.send(embed=Embeds.error("Servers only", "Use this inside a server."))
             return
         member_voice = getattr(ctx.author, "voice", None)
         channel = member_voice and member_voice.channel

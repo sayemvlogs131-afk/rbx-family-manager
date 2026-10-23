@@ -7,8 +7,10 @@ its own event loop and WAL mode keeps readers fast.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -98,6 +100,9 @@ class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
         self._db: aiosqlite.Connection | None = None
+        self._backup_task: asyncio.Task[None] | None = None
+        self.backup_keep = 7
+        self.backup_hours = 6
 
     # --------------------------------------------------------------- security
     async def get_security(self, guild_id: int) -> dict[str, Any]:
@@ -178,12 +183,75 @@ class Database:
         await self._db.commit()
         await migrate(self._db)
         log.info("Database ready at %s", self.path)
+        self._backup_task = asyncio.create_task(self._backup_loop())
 
     async def close(self) -> None:
+        if self._backup_task is not None:
+            self._backup_task.cancel()
+            try:
+                await self._backup_task
+            except asyncio.CancelledError:
+                pass
+            self._backup_task = None
         if self._db is not None:
             await self._db.close()
             self._db = None
             log.info("Database connection closed.")
+
+    # ---------------------------------------------------------------- backups
+    async def backup(self) -> Path | None:
+        """Snapshot the whole database to ``data/backups/`` (online/safe).
+
+        Uses SQLite's backup API from a worker thread, so this works while the
+        bot is live and never blocks the loop. Keeps the newest
+        ``self.backup_keep`` files and deletes the rest.
+        """
+        if self._db is None:
+            return None
+        backup_dir = Path(self.path).parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        dest = backup_dir / f"{Path(self.path).stem}-backup-{stamp}.db"
+
+        def _copy() -> None:
+            src = sqlite3.connect(self.path)
+            try:
+                dst = sqlite3.connect(str(dest))
+                try:
+                    src.backup(dst)
+                finally:
+                    dst.close()
+            finally:
+                src.close()
+
+        try:
+            await asyncio.to_thread(_copy)
+        except Exception:
+            log.exception("Database backup failed")
+            return None
+
+        stem = Path(self.path).stem
+        copies = sorted(backup_dir.glob(f"{stem}-backup-*.db"))
+        for old in copies[: -self.backup_keep]:
+            try:
+                old.unlink()
+            except OSError:
+                log.debug("Could not delete old backup %s", old.name)
+        log.info("Database backup created: %s", dest.name)
+        return dest
+
+    async def _backup_loop(self) -> None:
+        """Automatic safety net: snapshot right after boot, then periodically."""
+        try:
+            await asyncio.to_thread(lambda: None)  # let the bot finish starting
+            await self.backup()
+            while True:
+                await asyncio.sleep(self.backup_hours * 3600)
+                if not self.connected:
+                    return
+                await self.backup()
+        except asyncio.CancelledError:  # expected on shutdown
+            raise
 
     async def execute(self, sql: str, params: Sequence[Any] = ()) -> aiosqlite.Cursor:
         cur = await self.connection.execute(sql, params)

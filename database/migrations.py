@@ -17,7 +17,7 @@ import aiosqlite
 log = logging.getLogger("rbx.migrations")
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
-LATEST_VERSION = 6
+LATEST_VERSION = 7
 
 
 async def _has_column(db: aiosqlite.Connection, table: str, column: str) -> bool:
@@ -82,6 +82,23 @@ async def _migration_6(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
+async def _migration_7(db: aiosqlite.Connection) -> None:
+    """Speed indexes for the hot lookup paths (warnings, tickets, giveaways,
+    reminders, audit trail) — makes the bot feel snappier as data grows."""
+    indexes = (
+        "CREATE INDEX IF NOT EXISTS idx_warnings_guild_user ON warnings(guild_id, user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_actions_guild_id ON moderation_actions(guild_id, id)",
+        "CREATE INDEX IF NOT EXISTS idx_giveaways_active ON giveaways(guild_id, cancelled, ended)",
+        "CREATE INDEX IF NOT EXISTS idx_tickets_guild_status ON tickets(guild_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(delivered, remind_at)",
+        "CREATE INDEX IF NOT EXISTS idx_autoreply_guild ON autoreply_entries(guild_id)",
+        "CREATE INDEX IF NOT EXISTS idx_security_events_guild ON security_events(guild_id, id)",
+    )
+    for statement in indexes:
+        await db.execute(statement)
+    await db.commit()
+
+
 # Migrations 2+ are coroutines so column checks run for real instead of
 # relying on conditional DDL (SQLite cannot do "ADD COLUMN IF NOT EXISTS").
 _MIGRATIONS: dict[int, object] = {
@@ -91,6 +108,7 @@ _MIGRATIONS: dict[int, object] = {
     4: _migration_4,
     5: _migration_5,
     6: _migration_6,
+    7: _migration_7,
 }
 
 
