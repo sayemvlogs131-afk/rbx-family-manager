@@ -823,6 +823,10 @@ class Giveaways(commands.Cog, name="Giveaways"):
     @tasks.loop(seconds=20)
     async def watch_giveaways(self) -> None:
         """Close finished giveaways even after a restart."""
+        # Shutting down? Bail quietly — the database may already be closed and
+        # the process is on its way out (no crash spam in the log).
+        if self.bot.is_closed() or not getattr(self.bot.db, "connected", True):
+            return
         try:
             now = int(datetime.now(timezone.utc).timestamp())
             for giveaway in await self.bot.db.active_giveaways():

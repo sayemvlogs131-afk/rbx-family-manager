@@ -9,6 +9,13 @@ Format rules:
 - Bullet lines start with one of the status emoji: 🟢 Added, 🛠️ Fixed,
   ⚡ Improved, 🔒 Security, 🔴 Critical Issue.
 
+# v2.2.2 — Everything-on-GitHub update + /scan
+
+🟢 Added: `/scan` — owner-only full server audit in one embed: members, channels, roles, automod/anti-nuke settings, log channels, welcome, tickets, giveaways, warnings count and an auto-generated **Problems found** list (broken config references, missing bot permissions, unreachable role position).
+🛠️ Fixed: shutdown crash spam — background jobs (giveaway watcher, reminders, update announcer) touched the already-closed database during restarts; the bot now shuts tasks down first and every job bails out cleanly.
+🛠️ Fixed: permission-denied errors (e.g. `/botstatus set` by non-owner) no longer dump a raw Python traceback into the console log — they're normal check failures and are only sent to the user as a clean embed.
+⚡ Improved: the panel's GitHub auto-pull is now the only update path — the zip folder stays local only.
+
 # v2.2.1 — Music fix for "Sign in to confirm you're not a bot"
 
 🛠️ Fixed: `/play` on YouTube could fail with "Sign in to confirm you're not a bot" — that's YouTube blocking datacenter IPs, not a bug in the bot.

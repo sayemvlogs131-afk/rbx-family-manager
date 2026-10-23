@@ -153,6 +153,12 @@ class Database:
 
     # ------------------------------------------------------------------ core
     @property
+    def connected(self) -> bool:
+        """False after :meth:`close` (or before :meth:`connect`) — lets background
+        tasks bail out instead of crash-looping during shutdown."""
+        return self._db is not None
+
+    @property
     def connection(self) -> aiosqlite.Connection:
         if self._db is None:
             raise RuntimeError("Database is not connected. Call await db.connect() first.")

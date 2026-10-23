@@ -276,11 +276,13 @@ class RBXFamilyManager(commands.Bot):
     async def close(self) -> None:
         log.info("Shutting down gracefully...")
         await self._stop_health_server()
+        # Stop the gateway/tasks FIRST: background loops (giveaways, reminders,
+        # update announcer) must not be mid-query while the database closes.
+        await super().close()
         try:
             await self.db.close()
         except Exception:  # pragma: no cover - defensive
             log.exception("Error closing database")
-        await super().close()
         log.info("Shutdown complete.")
 
     # ---------------------------------------------------------- web app
@@ -564,8 +566,12 @@ async def handle_command_error(ctx: commands.Context[Any], error: Exception) -> 
     original = getattr(error, "original", None) or error
     if isinstance(original, commands.CommandNotFound):
         return
+    # Check failures (permissions, owner-only, maintenance) are ordinary —
+    # log them quietly instead of dumping the check traceback.
     log.error(
-        "Command %s failed", ctx.command and ctx.command.qualified_name, exc_info=original
+        "Command %s failed",
+        ctx.command and ctx.command.qualified_name,
+        exc_info=None if isinstance(original, commands.CheckFailure) else original,
     )
     await _send_error(ctx, "Command failed", _brief_error(original))
 

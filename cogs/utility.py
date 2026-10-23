@@ -6,17 +6,19 @@ tools (calc, timestamp, poll, embed builder) and account/server information.
 
 from __future__ import annotations
 
+import json
 import logging
 import platform
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from utils.checks import require_permissions
+import config
+from utils.checks import is_bot_owner, require_permissions
 from utils.embeds import Embeds
 from utils.helpers import bot_invite_url, safe_calc, truncate
 from utils.time_parser import (
@@ -88,6 +90,7 @@ COMMAND_CATEGORY: dict[str, str] = {
     "/shuffle": "🔊 Voice",
     "/queue": "🔊 Voice",
     "/nowplaying": "🔊 Voice",
+    "/scan": "🧰 Utility",
     "/warn": "🛡️ Moderation",
     "/warnings": "🛡️ Moderation",
     "/automod": "🛡️ Moderation",
@@ -859,9 +862,265 @@ class Utility(commands.Cog, name="Utility"):
                 ephemeral=True,
             )
 
+    # --------------------------------------------------------------- scan
+    @commands.hybrid_command(name="scan")
+    @commands.guild_only()
+    async def scan(self, ctx: commands.Context) -> None:
+        """Audit the whole server: members, channels, config, moderation data and problems."""
+        guild = ctx.guild
+        if guild is None:  # pragma: no cover - guild_only check should catch this
+            return
+        if not (is_bot_owner(ctx) or guild.owner_id == ctx.author.id):
+            await ctx.send(
+                embed=Embeds.error(
+                    "Owner only",
+                    "Only the **bot owner** or the **server owner** can run `/scan`.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await ctx.defer(ephemeral=True)
+
+        def channel_ref(value: Any) -> str:
+            if not value:
+                return "❌ not set"
+            channel = guild.get_channel(int(value))
+            if channel is None:
+                return f"⚠️ deleted (`{value}`)"
+            return f"✅ {channel.mention}"
+
+        def role_ref(value: Any) -> str:
+            if not value:
+                return "❌ not set"
+            role = guild.get_role(int(value))
+            if role is None:
+                return f"⚠️ deleted (`{value}`)"
+            return f"✅ {role.mention}"
+
+        def ok(value: Any) -> str:
+            return "✅ on" if value else "❌ off"
+
+        members = list(guild.members)
+        bots = sum(1 for m in members if m.bot)
+        humans = len(members) - bots
+        key_perm_names = (
+            "ban_members", "kick_members", "moderate_members", "manage_roles",
+            "manage_channels", "manage_messages", "view_audit_log", "connect",
+            "send_messages", "view_channel",
+        )
+        joys: list[str] = []  # issues
+
+        db = self.bot.db
+        db_error = False
+        try:
+            settings = await db.get_guild(guild.id)
+            automod = await db.get_automod(guild.id)
+            security = await db.get_security(guild.id)
+            giveaways = await db.guild_giveaways(guild.id, include_ended=False)
+            giveaways_total = len(await db.guild_giveaways(guild.id, include_ended=True))
+            tickets = await db.ticket_counts(guild.id)
+            warnings_total = int(
+                await db.scalar(
+                    "SELECT COUNT(*) FROM warnings WHERE guild_id = ?", (guild.id,), 0
+                )
+            )
+            actions_total = int(
+                await db.scalar(
+                    "SELECT COUNT(*) FROM moderation_actions WHERE guild_id = ?",
+                    (guild.id,),
+                    0,
+                )
+            )
+            events_total = int(
+                await db.scalar(
+                    "SELECT COUNT(*) FROM security_events WHERE guild_id = ?",
+                    (guild.id,),
+                    0,
+                )
+            )
+            autoreplies = len(await db.autoreply_entries(guild.id))
+            overrides = len(await db.guild_command_overrides(guild.id))
+            ignored_ch = len(await db.ignored_channels(guild.id))
+            ignored_roles = len(await db.ignored_roles(guild.id))
+            try:
+                autojoin_raw = await db.get_stat(guild.id, "vc_autojoin", "")
+            except Exception:
+                autojoin_raw = ""
+        except Exception:
+            log.exception("/scan database read failed in guild %s", guild.id)
+            db_error = True
+            settings = {}
+            automod = {}
+            security = {}
+            giveaways = []
+            giveaways_total = 0
+            tickets = {"open": 0, "closed": 0}
+            warnings_total = actions_total = events_total = 0
+            autoreplies = overrides = ignored_ch = ignored_roles = 0
+            autojoin_raw = ""
+
+        # --------- issues: broken config references + bot permission trouble
+        invincible_roles = 0
+        top_role_blocker = ""
+        me_top = guild.me.top_role.position if guild.me else 0
+        for role in guild.roles:
+            if role.managed or role.is_default() or role.position <= me_top:
+                continue
+            if role.permissions.administrator:
+                invincible_roles += 1
+            if not top_role_blocker:
+                top_role_blocker = role.name
+        if top_role_blocker:
+            joys.append(
+                f"My top role is below **{top_role_blocker}** — I can't punish members "
+                "wearing higher roles. Drag my role above it."
+            )
+        broken = []
+        for label, kind, value in (
+            ("mod log", "channel", settings.get("mod_log_channel")),
+            ("member log", "channel", settings.get("member_log_channel")),
+            ("server log", "channel", settings.get("server_log_channel")),
+            ("message log", "channel", settings.get("message_log_channel")),
+            ("welcome channel", "channel", settings.get("welcome_channel")),
+            ("ticket category", "channel", settings.get("ticket_category_id")),
+            ("staff role", "role", settings.get("staff_role_id")),
+            ("autorole", "role", settings.get("autorole_id")),
+            ("ticket staff role", "role", settings.get("ticket_staff_role_id")),
+            ("anti-nuke log", "channel", security.get("log_channel")),
+        ):
+            if not value:
+                continue
+            found = (
+                guild.get_channel(int(value)) if kind == "channel"
+                else guild.get_role(int(value))
+            )
+            if found is None:
+                broken.append(label)
+        if broken:
+            joys.append(
+                "Config points to deleted " + ", ".join(broken) +
+                " — re-set them with their setup commands."
+            )
+        missing_perms = [
+            p.replace("_", " ") for p in key_perm_names
+            if not (guild.me and getattr(guild.me.guild_permissions, p, False))
+        ]
+        if missing_perms:
+            joys.append(
+                "Missing permissions: **" + ", ".join(missing_perms) + "** — "
+                "reinvite or fix my role permissions."
+            )
+        if not settings.get("welcome_message"):
+            joys.append("**Welcome message is not set** — new members get no greeting. Use `/welcome`.")
+        if db_error:
+            joys.insert(0, "⚠️ Database read failed — some numbers may be missing.")
+
+        # ------------------------------------------------------------ embed
+        me = guild.me
+        has_admin = bool(me and me.guild_permissions.administrator)
+        embed = Embeds.info(
+            f"🔍 Server scan — {guild.name}",
+            f"Requested by {ctx.author.mention} • every value is live from Discord + the bot database",
+        )
+        embed.add_field(
+            name="📊 Server",
+            value=(
+                f"**Owner:** <@{guild.owner_id}>\n"
+                f"**Created:** <t:{int(guild.created_at.timestamp())}:R>\n"
+                f"**Members:** {humans} 👤 + {bots} 🤖 = {guild.member_count}\n"
+                f"**Boosts:** level {guild.premium_tier} ({guild.premium_subscription_count})\n"
+                f"**Channels:** {len(guild.text_channels)} 💬 • {len(guild.voice_channels)} 🔊 • "
+                f"{len(guild.forum_channels)} 🗒️ • {len(guild.stage_channels)} 🎙️ • {len(guild.categories)} 📁\n"
+                f"**Roles:** {len(guild.roles)} (administrators: {invincible_roles})\n"
+                f"**Emojis:** {len(guild.emojis)}/{guild.emoji_limit}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🛡️ Automod",
+            value=(
+                f"**Enabled:** {ok(automod.get('enabled', 1))}\n"
+                f"Spam filter {ok(automod.get('anti_spam', 0))} • duplicates {ok(automod.get('duplicate_filter', 0))} • "
+                f"invites {ok(automod.get('invite_filter', 0))} • links {ok(automod.get('link_filter', 0))}\n"
+                f"Mention limit {automod.get('mention_limit', '—')} • emoji {automod.get('emoji_limit', '—')} • "
+                f"caps {automod.get('caps_limit', '—')}% • warn threshold {automod.get('warn_threshold', '—')}\n"
+                f"Timeout {automod.get('timeout_duration', '—')}s • exempt roles {len(json.loads(str(automod.get('exempt_roles') or '[]')))} • "
+                f"exempt channels {len(json.loads(str(automod.get('exempt_channels') or '[]')))}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🔒 Anti-nuke / security",
+            value=(
+                f"**Enabled:** {ok(security.get('anti_nuke_enabled', 0))}\n"
+                f"Limits /60s: bans {security.get('ban_limit', '—')} • kicks {security.get('kick_limit', '—')} • "
+                f"channels {security.get('channel_limit', '—')} • roles {security.get('role_limit', '—')}\n"
+                f"Joins: {security.get('join_limit', '—')} / {security.get('join_window_seconds', '—')}s → raid action *{security.get('raid_action', '?')}*\n"
+                f"Min account age {security.get('min_account_age_days', '—')}d → *{security.get('action', '?')}*\n"
+                f"Trusted roles {len(json.loads(str(security.get('trusted_role_ids') or '[]')))} • "
+                f"trusted users {len(json.loads(str(security.get('trusted_user_ids') or '[]')))} • "
+                f"log {channel_ref(security.get('log_channel'))}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="⚙️ Setup channels / roles",
+            value=(
+                f"Staff role: {role_ref(settings.get('staff_role_id'))}\n"
+                f"Mod log: {channel_ref(settings.get('mod_log_channel'))} • Member log: {channel_ref(settings.get('member_log_channel'))}\n"
+                f"Server log: {channel_ref(settings.get('server_log_channel'))} • Message log: {channel_ref(settings.get('message_log_channel'))}\n"
+                f"Welcome: {channel_ref(settings.get('welcome_channel'))} • message: "
+                f"{['❌ not set', '✅ set'][bool(settings.get('welcome_message'))]} • DM: {ok(settings.get('dm_welcome', 0))}\n"
+                f"Autorole: {role_ref(settings.get('autorole_id'))}\n"
+                f"Tickets: category {channel_ref(settings.get('ticket_category_id'))} • staff {role_ref(settings.get('ticket_staff_role_id'))}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="📚 Activity data",
+            value=(
+                f"**Warnings:** {warnings_total} total\n"
+                f"**Mod actions:** {actions_total} logged\n"
+                f"**Security events:** {events_total} logged\n"
+                f"**Giveaways:** active {len(giveaways)} / total {giveaways_total}\n"
+                f"**Tickets:** open {tickets.get('open', 0)} / closed {tickets.get('closed', 0)}\n"
+                f"**Auto-replies:** {autoreplies} • command limits: {overrides} • ignored: {ignored_ch} ch / {ignored_roles} roles"
+            ),
+            inline=False,
+        )
+        autojoin_desc = "❌ off"
+        if autojoin_raw:
+            try:
+                data = json.loads(autojoin_raw)
+                autojoin_desc = f"✅ follows <@{data['user_id']}>"
+            except Exception:
+                autojoin_desc = "⚠️ corrupt config"
+        embed.add_field(
+            name="🔊 Voice",
+            value=(
+                f"Autojoin: {autojoin_desc}\n"
+                f"Administrator permission: {ok(has_admin)}"
+            ),
+            inline=False,
+        )
+        if joys:
+            embed.add_field(
+                name="⛔ Problems found",
+                value="\n".join(f"• {line}" for line in joys)[:1024],
+                inline=False,
+            )
+        if not joys:
+            embed.add_field(name="⛔ Problems found", value="✅ None — everything looks healthy!", inline=False)
+
+        await ctx.send(embed=embed, ephemeral=True)
+
     # ---------------------------------------------------------- reminders job
     @tasks.loop(seconds=15)
     async def reminder_loop(self) -> None:
+        # Shutting down? Bail quietly — the database may already be closed.
+        if self.bot.is_closed() or not getattr(self.bot.db, "connected", True):
+            return
         try:
             now = int(time.time())
             for reminder in await self.bot.db.due_reminders(now):

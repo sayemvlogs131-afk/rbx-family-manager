@@ -20,11 +20,8 @@ ENV/
 dist/
 build/
 
-# Databases & runtime data
-data/*.db
-data/*.db-*
-data/*.log
-data/*.json
+# Databases & runtime data (including the dashboard's local token)
+data/*
 !data/.gitkeep
 
 # Test / type tooling

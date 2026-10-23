@@ -1207,6 +1207,9 @@ class Security(commands.Cog, name="Security"):
     @tasks.loop(minutes=15)
     async def update_loop(self) -> None:
         """Post release notes to every configured update channel when a new version lands."""
+        # Shutting down? Bail quietly — the database may already be closed.
+        if self.bot.is_closed() or not getattr(self.bot.db, "connected", True):
+            return
         try:
             release = parse_updates(config.UPDATES_PATH)
             if not release.version:
