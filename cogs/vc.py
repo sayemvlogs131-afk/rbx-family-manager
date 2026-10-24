@@ -38,8 +38,11 @@ AUTOJOIN_KEY = "vc_autojoin"  # guild_stats key: {"user_id": ..., "channel_id": 
 SESSION_KEY = "vc_session"   # guild_stats key: {"channel_id": ..., "volume":...,"tracks": [queries]}
 RESTORE_LIMIT = 20  # max tracks re-resolved after a restart
 DEFAULT_VOLUME = 0.5  # 50% keeps ears happy; /volume adjusts live
-FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-FFMPEG_OPTS = "-vn"
+FFMPEG_BEFORE = (
+    "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
+    "-reconnect_on_http_error 429,502,503,504"
+)
+FFMPEG_OPTS = "-vn -loglevel error"
 
 
 def _fmt_duration(seconds: Any) -> str:
@@ -563,6 +566,32 @@ class VCSystem(commands.Cog, name="VC System"):
             log.exception("Queue continuation failed in %s", state.guild.id)
 
     # ------------------------------------------------------------- commands
+    async def _rejoin_after_bounce(self, guild: discord.Guild, state: GuildVC) -> None:
+        """Get back into the session channel a few times when bounced out."""
+        for attempt in range(3):
+            await asyncio.sleep(4 * (attempt + 1))
+            if self.bot.is_closed() or state.stop_requested or self._vc(guild) is not None:
+                return
+            try:
+                channel = guild.get_channel(state.session_channel_id)
+                if not isinstance(channel, discord.VoiceChannel):
+                    return
+                async with state.lock:
+                    if self._vc(guild) is None:
+                        await self._connect(state, channel)
+                if self._vc(guild) is not None and not self._vc(guild).is_playing() and not self._vc(guild).is_paused():
+                    if state.current or state.queue:
+                        # Re-resolve the queue from the saved session (stream URLs
+                        # expire after a disconnect).
+                        await self._restore_session(guild)
+                    elif state.loop:
+                        await self._restore_session(guild)
+                log.info("Rejoined voice in guild %s after being bounced out.", guild.id)
+                return
+            except Exception:
+                log.warning("Rejoin attempt %s failed in guild %s", attempt + 1, guild.id, exc_info=True)
+        log.warning("Giving up rejoining voice in guild %s — run /join to get me back.", guild.id)
+
     @commands.hybrid_command(name="join")
     @app_commands.describe(channel="Voice channel to join (defaults to the one you're in)")
     async def join_command(
@@ -826,6 +855,7 @@ class VCSystem(commands.Cog, name="VC System"):
         state.queue.clear()
         state.current = None
         state.loop = False
+        state.stop_requested = True  # the bounce handler must not rejoin
         state.vc = None
         try:
             await self.bot.db.set_stat(ctx.guild.id, SESSION_KEY, "")
@@ -962,19 +992,26 @@ class VCSystem(commands.Cog, name="VC System"):
         before: discord.VoiceState,
         after: discord.VoiceState,
     ) -> None:
-        """Autojoin follow + cleanup when the bot is pulled out of voice."""
+        """Autojoin follow + auto-rejoin when the bot is bounced out of voice."""
         guild = member.guild
         if member.id == self.bot.user.id:  # type: ignore[union-attr]
             if after.channel is None:
                 state = self.states.get(guild.id)
                 if state is not None and state.vc is not None and not state.vc.is_connected():
+                    stopped_ourselves = state.stop_requested
                     state.vc = None
-                    state.queue.clear()
-                    state.current = None
-                    try:
-                        await self.bot.db.set_stat(guild.id, SESSION_KEY, "")
-                    except Exception:
-                        log.debug("Could not clear session in guild %s", guild.id, exc_info=True)
+                    if stopped_ourselves:
+                        state.current = None
+                        state.queue.clear()
+                        state.stop_requested = False
+                        try:
+                            await self.bot.db.set_stat(guild.id, SESSION_KEY, "")
+                        except Exception:
+                            log.debug("Could not clear session in guild %s", guild.id, exc_info=True)
+                    elif state.session_channel_id:
+                        # Kicked/bounced out (network glitch, region move): slide
+                        # back in and keep the queue alive instead of dying.
+                        self.bot.loop.create_task(self._rejoin_after_bounce(guild, state))
             return
 
         state: GuildVC | None = self.states.get(guild.id)

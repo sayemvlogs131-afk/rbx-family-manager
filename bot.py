@@ -137,6 +137,9 @@ class RBXFamilyManager(commands.Bot):
         self.add_check(not_ignored().predicate)
         self.add_check(maintenance_mode().predicate)
 
+        # Stray background-task exceptions must never take the bot down.
+        self.loop.set_exception_handler(self._handle_loop_exception)  # type: ignore[attr-defined]
+
         for extension in COGS:
             try:
                 await self.load_extension(extension)
@@ -154,21 +157,46 @@ class RBXFamilyManager(commands.Bot):
             await self._mount_webapp()
 
     async def sync_commands(self) -> None:
-        """Sync slash commands globally, and instantly to DEV_GUILD_ID if set."""
+        """Sync slash commands **once, globally**.
+
+        Older versions also copied the commands into the dev guild. Discord
+        shows guild-scoped *and* global copies of the same command side by
+        side, so the picker displayed every command twice there. Guild-scoped
+        copies are wiped here and never created again.
+        """
         try:
             if config.DEV_GUILD_ID:
                 dev_guild = discord.Object(id=config.DEV_GUILD_ID)
-                self.tree.copy_global_to(guild=dev_guild)
-                synced_dev = await self.tree.sync(guild=dev_guild)
-                log.info(
-                    "Synced %s command(s) to dev guild %s.",
-                    len(synced_dev),
-                    config.DEV_GUILD_ID,
-                )
+                self.tree.clear_commands(guild=dev_guild)
+                await self.tree.sync(guild=dev_guild)  # removes leftover copies
+                log.info("Cleared guild-scoped command copies in dev guild %s.", config.DEV_GUILD_ID)
             synced = await self.tree.sync()
             log.info("Synced %s global command(s).", len(synced))
         except discord.HTTPException:
             log.exception("Slash command sync failed")
+
+    @staticmethod
+    def _handle_loop_exception(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        """Unhandled background-task exceptions are logged, not fatal.
+
+        Keeps the bot running when a stray task blows up; the offender gets
+        dumped into the log file for later fixing.
+        """
+        exception = context.get("exception")
+        if exception is None:
+            log.error("Async task error: %.200s", context.get("message", "unknown"))
+            return
+        if isinstance(exception, (asyncio.CancelledError, discord.ConnectionClosed)):
+            return  # routine during shutdown/reconnects
+        log.error("Async task crashed: %s", exception, exc_info=exception)
+
+    async def on_error(self, event_method: str, *args: Any, **kwargs: Any) -> None:  # noqa: ARG002
+        """Event-dispatch safety net: log the exception, never die.
+
+        discord.py already swallows dispatch errors; this route sends them to
+        our log file with the event name so crashes are visible in the panel.
+        """
+        log.exception("Unhandled error in event %s — the bot keeps running.", event_method)
 
     async def on_ready(self) -> None:
         self.session_ready.set()

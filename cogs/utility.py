@@ -18,7 +18,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 import config
-from utils.checks import is_bot_owner, require_permissions
+from utils.checks import is_bot_owner, require_admin, require_permissions
 from utils.embeds import Embeds
 from utils.helpers import bot_invite_url, safe_calc, truncate
 from utils.time_parser import (
@@ -58,6 +58,7 @@ COMMAND_CATEGORY: dict[str, str] = {
     "/channelinfo": "🧰 Utility",
     "/permissions": "🧰 Utility",
     "/afk": "🧰 Utility",
+    "/afkchannel": "🧰 Utility",
     "/remind": "🧰 Utility",
     "/timestamp": "🧰 Utility",
     "/calc": "🧰 Utility",
@@ -591,6 +592,119 @@ class Utility(commands.Cog, name="Utility"):
         await ctx.send(embed=embed)
 
     # -------------------------------------------------------------- tools
+    # ------------------------------------------------- server AFK channel
+    AFK_TIMEOUTS = (60, 300, 900, 1800, 3600)
+
+    @commands.hybrid_group(name="afkchannel", invoke_without_command=True)
+    @commands.guild_only()
+    @require_admin()
+    async def afkchannel(self, ctx: commands.Context) -> None:
+        """Server AFK voice channel settings."""
+        guild = ctx.guild
+        assert guild is not None
+        afk = guild.afk_channel
+        embed = Embeds.info(
+            "Server AFK channel",
+            "**Commands**\n"
+            "`/afkchannel set channel:<voice> timeout:300` — set the AFK channel\n"
+            "`/afkchannel off` — remove it\n"
+            "`/afkchannel status` — show current settings",
+        )
+        embed.add_field(
+            name="Current",
+            value=(f"{afk.mention} (idle members move after {guild.afk_timeout}s)"
+                   if afk else "❌ not set"),
+            inline=False,
+        )
+        await ctx.send(embed=embed, ephemeral=True)
+
+    @afkchannel.command(name="set")
+    @require_admin()
+    @app_commands.describe(
+        channel="Voice channel idle members are moved into",
+        timeout="How long before idle members are moved (seconds)",
+    )
+    async def afkchannel_set(
+        self, ctx: commands.Context, channel: discord.VoiceChannel,
+        timeout: Optional[int] = None,
+    ) -> None:
+        """Set the server's AFK voice channel (Discord auto-moves idle members)."""
+        guild = ctx.guild
+        assert guild is not None
+        chosen = int(timeout or 300)
+        if chosen not in self.AFK_TIMEOUTS:
+            await ctx.send(
+                embed=Embeds.error(
+                    "Invalid timeout",
+                    "Discord only allows: 1, 5, 15, 30 or 60 minutes "
+                    "(60, 300, 900, 1800 or 3600 seconds). Default: 300.",
+                ),
+                ephemeral=True,
+            )
+            return
+        if not guild.me.guild_permissions.manage_guild:
+            await ctx.send(
+                embed=Embeds.error("Missing permission", "I need **Manage Server** to change AFK settings."),
+                ephemeral=True,
+            )
+            return
+        try:
+            await guild.edit(afk_channel=channel, afk_timeout=chosen, reason=f"/afkchannel by {ctx.author}")
+        except discord.Forbidden:
+            await ctx.send(
+                embed=Embeds.error("Not allowed", "Discord rejected the change — check my **Manage Server** permission."),
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException:
+            log.exception("AFK channel edit failed in guild %s", guild.id)
+            await ctx.send(embed=Embeds.error("Discord error", "The AFK channel could not be set — try again."), ephemeral=True)
+            return
+        await ctx.send(
+            embed=Embeds.success(
+                "AFK channel set",
+                f"Idle members now slide into **{channel.name}** after {chosen // 60} minute(s).",
+            )
+        )
+
+    @afkchannel.command(name="off")
+    @require_admin()
+    async def afkchannel_off(self, ctx: commands.Context) -> None:
+        """Remove the server AFK channel."""
+        guild = ctx.guild
+        assert guild is not None
+        if not guild.me.guild_permissions.manage_guild:
+            await ctx.send(
+                embed=Embeds.error("Missing permission", "I need **Manage Server** to change AFK settings."),
+                ephemeral=True,
+            )
+            return
+        try:
+            await guild.edit(afk_channel=None, reason=f"/afkchannel off by {ctx.author}")
+        except discord.HTTPException:
+            log.exception("AFK channel clear failed in guild %s", guild.id)
+            await ctx.send(embed=Embeds.error("Discord error", "The AFK channel could not be cleared — try again."), ephemeral=True)
+            return
+        await ctx.send(embed=Embeds.success("AFK channel removed", "Idle members now stay in their channel."))
+
+    @afkchannel.command(name="status")
+    @require_admin()
+    async def afkchannel_status(self, ctx: commands.Context) -> None:
+        """Show the current server AFK channel."""
+        guild = ctx.guild
+        assert guild is not None
+        afk = guild.afk_channel
+        if afk is None:
+            await ctx.send(embed=Embeds.info("AFK channel", "Not set — use `/afkchannel set`."), ephemeral=True)
+            return
+        await ctx.send(
+            embed=Embeds.info(
+                "AFK channel",
+                f"**{afk.name}** — idle members move after **{guild.afk_timeout}s**.",
+            ),
+            ephemeral=True,
+        )
+
     @commands.hybrid_command(name="afk")
     @commands.guild_only()
     @app_commands.describe(message="Why you are away (shown when you are pinged)")

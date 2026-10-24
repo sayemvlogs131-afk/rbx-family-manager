@@ -9,6 +9,14 @@ Format rules:
 - Bullet lines start with one of the status emoji: 🟢 Added, 🛠️ Fixed,
   ⚡ Improved, 🔒 Security, 🔴 Critical Issue.
 
+# v2.4.1 — Duplicate command fix, VC resilience, /afkchannel, uncrashable mode
+
+🛠️ Fixed: every slash command showed **twice** in the picker (a leftover dev-guild sync from an earlier version). The bot now syncs exactly once, globally, and cleans up the old duplicates on the next restart.
+🛠️ Fixed: VC smoothness — if the bot gets bounced out of voice (network glitch, region move), it now slides itself back in after a few seconds and keeps playing the saved queue instead of going silent. `/disconnect` is still the only thing that makes it leave on purpose.
+⚡ Improved: audio streaming reconnects on dropped connections (429/502/503/504 retry) and quieter FFmpeg logging.
+🟢 Added: `/afkchannel set channel:<voice> timeout:` — sets the server's real AFK voice channel so Discord auto-moves idle members there (1/5/15/30/60 min). `/afkchannel off` and `/afkchannel status` included.
+⚡ Improved: uncrashable pass — stray background-task errors are caught and logged instead of killing the bot, and all event-dispatch errors route to the log file with the event name.
+
 # v2.4.0 — Reaction roles: self-serve role panels
 
 🟢 Added: `/rolesetup setup channel:` — creates a role panel: a message with one button per role. Members click to get the role and click again to remove it — no staff needed, no pinging mods.
