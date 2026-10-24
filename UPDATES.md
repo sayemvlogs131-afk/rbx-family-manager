@@ -9,6 +9,10 @@ Format rules:
 - Bullet lines start with one of the status emoji: 🟢 Added, 🛠️ Fixed,
   ⚡ Improved, 🔒 Security, 🔴 Critical Issue.
 
+# v2.4.2 — /scan crash fix
+
+🛠️ Fixed: `/scan` crashed on the server hosting Python/discord.py 2.7.1 — it read a `forum_channels` property that doesn't exist there. Forum channel count is now computed safely, so the scan completes normally.
+
 # v2.4.1 — Duplicate command fix, VC resilience, /afkchannel, uncrashable mode
 
 🛠️ Fixed: every slash command showed **twice** in the picker (a leftover dev-guild sync from an earlier version). The bot now syncs exactly once, globally, and cleans up the old duplicates on the next restart.

@@ -1136,6 +1136,7 @@ class Utility(commands.Cog, name="Utility"):
             joys.insert(0, "⚠️ Database read failed — some numbers may be missing.")
 
         # ------------------------------------------------------------ embed
+        forum_count = sum(isinstance(c, discord.ForumChannel) for c in guild.channels)
         me = guild.me
         has_admin = bool(me and me.guild_permissions.administrator)
         embed = Embeds.info(
@@ -1150,7 +1151,7 @@ class Utility(commands.Cog, name="Utility"):
                 f"**Members:** {humans} 👤 + {bots} 🤖 = {guild.member_count}\n"
                 f"**Boosts:** level {guild.premium_tier} ({guild.premium_subscription_count})\n"
                 f"**Channels:** {len(guild.text_channels)} 💬 • {len(guild.voice_channels)} 🔊 • "
-                f"{len(guild.forum_channels)} 🗒️ • {len(guild.stage_channels)} 🎙️ • {len(guild.categories)} 📁\n"
+                f"{forum_count} 🗒️ • {len(guild.stage_channels)} 🎙️ • {len(guild.categories)} 📁\n"
                 f"**Roles:** {len(guild.roles)} (administrators: {invincible_roles})\n"
                 f"**Emojis:** {len(guild.emojis)}/{guild.emoji_limit}"
             ),
