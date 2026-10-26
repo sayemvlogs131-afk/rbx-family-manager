@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import platform
 import time
+from pathlib import Path
 from typing import Optional
 
 import discord
@@ -43,7 +44,7 @@ class Owner(commands.Cog, name="Bot"):
         await ctx.send(
             embed=Embeds.info(
                 "Owner commands",
-                "`/owner reload cog:` • `/owner sync` • `/owner backup` • `/owner shutdown` • "
+                "`/owner reload cog:` • `/owner sync` • `/owner cookies file:` • `/owner backup` • `/owner shutdown` • "
                 "`/owner guilds` • `/owner status` • `/owner say` • `/owner broadcast`",
             ),
             ephemeral=True,
@@ -119,6 +120,49 @@ class Owner(commands.Cog, name="Bot"):
                 "Global sync complete",
                 f"**{len(synced)}** command(s) synced. Global updates can take up to an hour.",
             )
+        )
+
+    @owner.command(name="cookies")
+    @owner_only()
+    @app_commands.describe(
+        file="cookies.txt exported with the “Get cookies.txt LOCALLY” browser extension",
+    )
+    async def owner_cookies(self, ctx: commands.Context, file: discord.Attachment) -> None:
+        """Upload cookies.txt through Discord so /play works (no panel files needed)."""
+        await ctx.defer(ephemeral=True)
+        if file.size > 300_000:
+            await ctx.send(
+                embed=Embeds.error(
+                    "File too big",
+                    f"cookies.txt should be a few KB — got **{file.size}** bytes.",
+                ),
+                ephemeral=True,
+            )
+            return
+        try:
+            data = await file.read()
+        except discord.HTTPException as exc:
+            await ctx.send(embed=Embeds.error("Read failed", str(exc)), ephemeral=True)
+            return
+        text = data.decode("utf-8", errors="replace")
+        if "# Netscape HTTP Cookie File" not in text and "# HTTP Cookie File" not in text:
+            await ctx.send(
+                embed=Embeds.error(
+                    "Not a cookies file",
+                    "Export the file with the **“Get cookies.txt LOCALLY”** browser extension "
+                    "on youtube.com, then attach that file here.",
+                ),
+                ephemeral=True,
+            )
+            return
+        dest = Path(__file__).resolve().parent.parent / "cookies.txt"
+        dest.write_text(text, encoding="utf-8")
+        await ctx.send(
+            embed=Embeds.success(
+                "cookies.txt installed ✅",
+                f"Saved `{dest.name}` — `/play` will now use it on the next song.",
+            ),
+            ephemeral=True,
         )
 
     @owner.command(name="backup")

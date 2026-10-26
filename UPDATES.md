@@ -9,6 +9,12 @@ Format rules:
 - Bullet lines start with one of the status emoji: 🟢 Added, 🛠️ Fixed,
   ⚡ Improved, 🔒 Security, 🔴 Critical Issue.
 
+# v2.4.4 — One-command cookies upload (+ token leak fix)
+
+🟢 Added: `/owner cookies file:` — send your `cookies.txt` to the bot in Discord and it installs it itself. No more uploading files in the hosting panel — `/play` setup is now one command.
+🔒 Security: the example `.env.example` accidentally contained a real bot token — replaced with placeholders. The owner must reset the bot token in the Discord Developer Portal.
+⚡ Improved: full Wispbyte free-hosting deployment guide in DEPLOY.txt (GitHub pull + panel variables, no manual file uploads).
+
 # v2.4.3 — Duplicate-message killer + single-instance guard
 
 🛠️ Fixed: messages firing **twice** (commands, `/announce`, auto-replies) — the root cause is two live bot processes with the same token, which Discord allows and which most host watchdogs create on restart. The bot now takes an exclusive OS lock at startup: a second process exits immediately with a clear log line, so duplicates are impossible.
