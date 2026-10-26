@@ -9,6 +9,12 @@ Format rules:
 - Bullet lines start with one of the status emoji: 🟢 Added, 🛠️ Fixed,
   ⚡ Improved, 🔒 Security, 🔴 Critical Issue.
 
+# v2.4.3 — Duplicate-message killer + single-instance guard
+
+🛠️ Fixed: messages firing **twice** (commands, `/announce`, auto-replies) — the root cause is two live bot processes with the same token, which Discord allows and which most host watchdogs create on restart. The bot now takes an exclusive OS lock at startup: a second process exits immediately with a clear log line, so duplicates are impossible.
+🛠️ Fixed: reconnects could rerun the startup recovery and re-send the owner's "bot started with problems" DM every time Discord reconnected. `on_ready` work is now one-shot.
+⚡ Improved: PC auto-start removed — the bot no longer starts itself with Windows; it lives on the hosting panel only.
+
 # v2.4.2 — /scan crash fix
 
 🛠️ Fixed: `/scan` crashed on the server hosting Python/discord.py 2.7.1 — it read a `forum_channels` property that doesn't exist there. Forum channel count is now computed safely, so the scan completes normally.

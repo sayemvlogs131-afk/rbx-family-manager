@@ -69,6 +69,55 @@ INTENTS.voice_states = True
 
 
 # --------------------------------------------------------------------------
+# Singleton guard
+# --------------------------------------------------------------------------
+_singleton_handle: Any = None  # module-level: the handle must stay open for the lock to hold
+
+
+def acquire_singleton_lock() -> None:
+    """Hold an exclusive OS lock so only ONE instance of the bot can run.
+
+    Discord happily allows several gateway sessions with the same token, so
+    when a watchdog or panel restart fires while the old process is still
+    hanging, the bot runs TWICE — every command, announcement and auto-reply
+    then fires twice. The lock file makes that state impossible: a duplicate
+    process exits immediately with a clear log line instead of duplicating
+    everything it does.
+    """
+    config.ensure_dirs()
+    path = config.DATA_DIR / "bot.lock"
+    try:
+        # Open without truncating so a second process can never wipe the
+        # lock file out from under the running one.
+        handle = open(path, "a+b")
+    except OSError as exc:
+        log.warning("Could not open singleton lock file (%s); continuing without it.", exc)
+        return
+    try:
+        if sys.platform.startswith("win"):
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        log.critical(
+            "Another instance is already running (lock %s is held). Refusing "
+            "to start a second one — two instances = duplicate messages. "
+            "If the other process is truly dead, delete the lock file and retry.",
+            path,
+        )
+        sys.exit(2)
+    # Keep the handle open: the lock dies with the file object, so dropping
+    # it would silently release the lock and let a duplicate in.
+    globals()["_singleton_handle"] = handle
+    log.debug("Singleton lock acquired: %s", path)
+
+
+# --------------------------------------------------------------------------
 # Logging
 # --------------------------------------------------------------------------
 def setup_logging() -> None:
@@ -126,6 +175,7 @@ class RBXFamilyManager(commands.Bot):
         self._health_runner: Any = None
         self._health_site: Any = None
         self.startup_errors: list[str] = []
+        self._ready_handled: bool = False  # on_ready fires again on reconnects
 
     # ------------------------------------------------------------- lifecycle
     async def setup_hook(self) -> None:
@@ -207,8 +257,11 @@ class RBXFamilyManager(commands.Bot):
             len(self.guilds),
             round(self.latency * 1000),
         )
-        await self._recover_after_restart()
         await self._set_presence()
+        if self._ready_handled:
+            return  # ready fires again on every reconnect — recover/notify once only
+        self._ready_handled = True
+        await self._recover_after_restart()
         if self.startup_errors:
             await self._alert_owner_startup_problems()
             log.warning("Cogs that failed to load: %s", ", ".join(self.startup_errors))
@@ -640,6 +693,9 @@ def main() -> None:
         for problem in problems:
             log.error("Configuration error: %s", problem)
         config.fatal("Fix the configuration errors above and restart.")
+
+    # Never allow a second live process: it would double every message.
+    acquire_singleton_lock()
 
     bot = RBXFamilyManager()
     bot.tree.on_error = on_app_command_error  # type: ignore[method-assign]
